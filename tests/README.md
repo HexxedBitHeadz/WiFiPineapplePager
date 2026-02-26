@@ -29,6 +29,8 @@ Once deployed with `deploy-payloads`, both test tools appear in the Pager UI und
 
 ## Running on the Pager
 
+This can be ran either directly on device or via ssh to help test buttons if pager not responsive.
+
 ```bash
 # SSH into the Pager
 ssh root@172.16.52.1
