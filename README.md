@@ -1,4 +1,4 @@
-Hexxed BitHeadz WiFi Pineapple Pager repo
+## Hexxed BitHeadz WiFi Pineapple Pager repo
 
 Well it happened again, a neat new little gadget released and has stolen our attention from our everyday lives XD
 
