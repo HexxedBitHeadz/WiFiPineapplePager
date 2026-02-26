@@ -43,8 +43,6 @@ make clean && make CROSS_COMPILE=mipsel-linux-muslsf-
 
 Connect usb to VM 
 
-# On Kali, after syncing the updated files:
-
 ```bash
 export PATH="/opt/mipsel-linux-muslsf-cross/bin:$PATH"
 cd games
