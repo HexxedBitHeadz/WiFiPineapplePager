@@ -10,8 +10,7 @@ The source code is all here, to compile games, below are steps we took to compil
 
 
 ```
-cd /opt
-sudo wget https://musl.cc/mipsel-linux-muslsf-cross.tgz
+sudo wget -P /opt https://musl.cc/mipsel-linux-muslsf-cross.tgz
 sudo tar xzf mipsel-linux-muslsf-cross.tgz
 export PATH="/opt/mipsel-linux-muslsf-cross/bin:$PATH"
 ```
