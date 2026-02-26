@@ -41,14 +41,19 @@ make deploy CROSS_COMPILE=mipsel-linux-muslsf-
 
 Similar to before, just navigate to general > test_hw to see it in action!
 
+Games listed in payload > games menu:
 ![Description of image](images/gamesMenu.png)
 
+Image of packet capture game:
 ![Description of image](images/packet_capture.png)
 
+Image of pong game:
 ![Description of image](images/pong.png)
 
+Image of snake game:
 ![Description of image](images/snake.png)
 
+Image of button test tool:
 ![Description of image](images/button_test.png)
 
 
