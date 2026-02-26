@@ -40,3 +40,16 @@ make deploy CROSS_COMPILE=mipsel-linux-muslsf-
 ```
 
 Similar to before, just navigate to general > test_hw to see it in action!
+
+![Description of image](images/gamesMenu.png)
+
+![Description of image](images/packet_capture.png)
+
+![Description of image](images/pong.png)
+
+![Description of image](images/snake.png)
+
+![Description of image](images/button_test.png)
+
+
+
