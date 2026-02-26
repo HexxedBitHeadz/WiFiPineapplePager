@@ -11,7 +11,7 @@ The source code is all here, to compile games, below are steps we took to compil
 
 ```
 sudo wget -P /opt https://musl.cc/mipsel-linux-muslsf-cross.tgz
-sudo tar xzf mipsel-linux-muslsf-cross.tgz
+sudo tar xzf /opt/mipsel-linux-muslsf-cross.tgz
 export PATH="/opt/mipsel-linux-muslsf-cross/bin:$PATH"
 ```
 
@@ -29,7 +29,7 @@ There is also a test/test_hw.c tool that was used to assist getting the buttons 
 
 ```
 sudo wget -P /opt https://musl.cc/mipsel-linux-muslsf-cross.tgz
-sudo tar xzf mipsel-linux-muslsf-cross.tgz
+sudo tar xzf /opt/mipsel-linux-muslsf-cross.tgz
 export PATH="/opt/mipsel-linux-muslsf-cross/bin:$PATH"
 ```
 
