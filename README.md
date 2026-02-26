@@ -28,8 +28,7 @@ At this point as long as the device is plugged in and accessible via ssh root@17
 There is also a test/test_hw.c tool that was used to assist getting the buttons figured out. We are including that tool here as well, in case a button test is needed.
 
 ```
-cd /opt
-sudo wget https://musl.cc/mipsel-linux-muslsf-cross.tgz
+sudo wget -P /opt https://musl.cc/mipsel-linux-muslsf-cross.tgz
 sudo tar xzf mipsel-linux-muslsf-cross.tgz
 export PATH="/opt/mipsel-linux-muslsf-cross/bin:$PATH"
 ```
