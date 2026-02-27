@@ -109,6 +109,7 @@ typedef struct {
     char combat_msg[MAX_MSG + 1];
     int  combat_msg_timer;
     int  player_turn_first;
+    int  enemy_turn_pending;  /* 1 = enemy hasn't acted yet this round */
 
     /* Dialogue */
     int  dlg_npc_idx;
@@ -309,6 +310,7 @@ static int player_total_atk(const Player *p) {
 static int player_total_def(const Player *p) {
     int d = p->def;
     if (p->armor >= 0) d += ALL_ITEMS[p->armor].value;
+    if (p->def_buff_turns > 0) d += 5;
     return d;
 }
 
@@ -460,11 +462,13 @@ static void start_combat(Game *g, int tmpl_idx) {
     g->combat_sub = 0;
     g->combat_msg[0] = '\0';
     g->combat_msg_timer = 0;
+    g->enemy_turn_pending = 0;
 
     g->player_turn_first = (g->player.speed >= e->speed);
 
     /* Reset player combat buffs */
     g->player.atk_buff_turns = 0;
+    g->player.def_buff_turns = 0;
     g->player.shield_active = 0;
 
     if (e->is_boss) {
@@ -552,16 +556,20 @@ static int do_enemy_attack(Game *g) {
 
     if (p->shield_active) {
         p->shield_active = 0;
-        snprintf(g->combat_msg, MAX_MSG, "ICE Shield absorbs the hit!");
+        snprintf(g->combat_msg, MAX_MSG, "Aegis Shield absorbs the hit!");
         return 0;
     }
 
     p->hp -= dmg;
     if (p->hp < 0) p->hp = 0;
 
-    snprintf(g->combat_msg, MAX_MSG, "%s attacks for %d damage!", e->name, dmg);
+    snprintf(g->combat_msg, MAX_MSG, "%s: %d dmg!", e->name, dmg);
     sfx_player_hit();
     g->shake_frames = 6;
+
+    /* Red screen flash when player takes damage */
+    g->flash_color = (int)CYB_RED;
+    g->flash_frames = 3;
 
     /* Flash B button LED (damage indicator) */
     hw_led_b_button(255);
@@ -582,6 +590,7 @@ static void process_turn_end(Game *g) {
 
     /* Buff countdown */
     if (p->atk_buff_turns > 0) p->atk_buff_turns--;
+    if (p->def_buff_turns > 0) p->def_buff_turns--;
     if (e->def_debuff_turns > 0) e->def_debuff_turns--;
 
     /* Check victory */
@@ -654,6 +663,15 @@ static uint16_t tile_color(char tile, int frame) {
         case TILE_EXIT:     return CYB_EXIT;
         default:            return CYB_FLOOR;
     }
+}
+
+/* Check if a terminal at map/x/y has been used */
+static int is_terminal_used(const Game *g, int map, int tx, int ty) {
+    for (int t = 0; t < (int)NUM_TERMINALS; t++) {
+        if (TERMINALS[t].map == map && TERMINALS[t].x == tx && TERMINALS[t].y == ty)
+            return g->terminals_used[t];
+    }
+    return 0;
 }
 
 static void draw_tile(GfxContext *gfx, int sx, int sy, char tile, int frame) {
@@ -800,6 +818,13 @@ static void render_explore(GfxContext *gfx, Game *g) {
             }
 
             draw_tile(gfx, sx, sy, tile, frame);
+
+            /* Dim used terminals — override blink with static color */
+            if (tile == TILE_TERMINAL && is_terminal_used(g, p->current_map, col, map_row)) {
+                gfx_rect_fill(gfx, sx, sy, TILE_SIZE, TILE_SIZE, CYB_DIM_GREEN);
+                gfx_rect(gfx, sx + 4, sy + 3, 12, 10, CYB_DIM_GREEN);
+                gfx_text(gfx, sx + 6, sy + 5, ">", CYB_DIM_GREEN);
+            }
         }
     }
 
@@ -853,8 +878,8 @@ static void render_explore(GfxContext *gfx, Game *g) {
 /* ════════════════════════════════════════════════════════════════════ */
 
 static void draw_enemy_art(GfxContext *gfx, const CombatEnemy *e, int frame) {
-    int cx = SCREEN_W / 2;
-    int cy = 85;
+    int cx = 340;  /* Shifted right to make room for stats panel on left */
+    int cy = 78;
     uint16_t c = e->color;
     int pulse = (frame & 16) ? 2 : 0;
 
@@ -905,7 +930,41 @@ static void render_combat(GfxContext *gfx, Game *g) {
 
     gfx_hline(ctx, 0, 34, SCREEN_W, CYB_DIM_BLUE);
 
-    /* ── Enemy art (center) ── */
+    /* ── Player stats panel (left side of middle zone) ── */
+    {
+        int px = 8, py = 40;
+        /* Vertical separator between stats panel and enemy art */
+        gfx_vline(ctx, 220, 35, 87, CYB_DIM_BLUE);
+
+        /* ATK / DEF / SPD readout */
+        gfx_text_scaled(ctx, px, py, "ATK", CYB_ORANGE, 2);
+        gfx_printf_scaled(ctx, px + 50, py, CYB_GREEN, 2, "%d", p->atk);
+        py += 16;
+        gfx_text_scaled(ctx, px, py, "DEF", CYB_BLUE, 2);
+        gfx_printf_scaled(ctx, px + 50, py, CYB_GREEN, 2, "%d", p->def);
+        py += 16;
+        gfx_text_scaled(ctx, px, py, "SPD", CYB_CYAN, 2);
+        gfx_printf_scaled(ctx, px + 50, py, CYB_GREEN, 2, "%d", p->speed);
+
+        /* Equipped gear */
+        py += 20;
+        if (p->weapon >= 0)
+            gfx_printf(ctx, px, py, CYB_ORANGE, "[%s]", ALL_ITEMS[p->weapon].name);
+        py += 10;
+        if (p->armor >= 0)
+            gfx_printf(ctx, px, py, CYB_BLUE, "[%s]", ALL_ITEMS[p->armor].name);
+
+        /* Active buffs */
+        py += 12;
+        if (p->atk_buff_turns > 0)
+            gfx_text(ctx, px, py, "ATK+", CYB_ORANGE);
+        if (p->def_buff_turns > 0)
+            gfx_text(ctx, px + (p->atk_buff_turns > 0 ? 40 : 0), py, "DEF+", CYB_BLUE);
+        if (p->shield_active)
+            gfx_text(ctx, px + (p->atk_buff_turns > 0 ? 40 : 0) + (p->def_buff_turns > 0 ? 40 : 0), py, "SHIELD", CYB_CYAN);
+    }
+
+    /* ── Enemy art (right side) ── */
     draw_enemy_art(ctx, e, frame);
 
     /* ── Divider ── */
@@ -913,17 +972,22 @@ static void render_combat(GfxContext *gfx, Game *g) {
 
     /* ── Player stats ── */
     gfx_printf_scaled(ctx, 4, 125, CYB_GREEN, 2, "%s  L%d", p->name, p->level);
-    gfx_text(ctx, 4, 144, "HP", CYB_RED);
-    draw_bar(ctx, 20, 144, 100, 7, p->hp, p->max_hp, CYB_HP_BAR, CYB_HP_BG);
-    gfx_printf(ctx, 22, 144, COLOR_WHITE, "%d/%d", p->hp, p->max_hp);
-    gfx_text(ctx, 130, 144, "EN", CYB_BLUE);
-    draw_bar(ctx, 146, 144, 80, 7, p->energy, p->max_energy, CYB_EN_BAR, CYB_EN_BG);
-    gfx_printf(ctx, 148, 144, COLOR_WHITE, "%d/%d", p->energy, p->max_energy);
 
-    if (p->atk_buff_turns > 0)
-        gfx_text(ctx, 240, 144, "ATK+", CYB_ORANGE);
-    if (p->shield_active)
-        gfx_text(ctx, 280, 144, "SHIELD", CYB_CYAN);
+    /* HP bar — flash when at 20% or below */
+    int hp_low = (p->max_hp > 0 && p->hp * 5 <= p->max_hp);
+    uint16_t hp_bar_col = (hp_low && (frame & 4)) ? CYB_YELLOW : CYB_HP_BAR;
+    uint16_t hp_lbl_col = (hp_low && (frame & 4)) ? CYB_YELLOW : CYB_RED;
+    gfx_text(ctx, 4, 144, "HP", hp_lbl_col);
+    draw_bar(ctx, 20, 144, 100, 7, p->hp, p->max_hp, hp_bar_col, CYB_HP_BG);
+    gfx_printf(ctx, 22, 144, COLOR_WHITE, "%d/%d", p->hp, p->max_hp);
+
+    /* EN bar — flash when at 20% or below */
+    int en_low = (p->max_energy > 0 && p->energy * 5 <= p->max_energy);
+    uint16_t en_bar_col = (en_low && (frame & 4)) ? CYB_YELLOW : CYB_EN_BAR;
+    uint16_t en_lbl_col = (en_low && (frame & 4)) ? CYB_YELLOW : CYB_BLUE;
+    gfx_text(ctx, 130, 144, "EN", en_lbl_col);
+    draw_bar(ctx, 146, 144, 80, 7, p->energy, p->max_energy, en_bar_col, CYB_EN_BG);
+    gfx_printf(ctx, 148, 144, COLOR_WHITE, "%d/%d", p->energy, p->max_energy);
 
     /* ── Combat menu or sub-menu ── */
     int menu_y = 158;
@@ -944,44 +1008,97 @@ static void render_combat(GfxContext *gfx, Game *g) {
                      i == g->combat_cursor ? CYB_GREEN : CYB_DIM_GREEN, 2);
         }
     } else if (g->combat_phase == COMBAT_ABILITY) {
-        gfx_text(ctx, 4, menu_y, "Select Ability [B=Back]:", CYB_CYAN);
-        menu_y += 10;
-        for (int i = 0; i < p->ability_count && i < 4; i++) {
-            int ab_id = p->abilities[i + (g->combat_sub >= 4 ? 4 : 0)];
+        /* Sub-menu overlays player bar area for more room */
+        int sm_y = 124;
+        gfx_rect_fill(ctx, 0, 122, SCREEN_W, SCREEN_H - 122, CYB_DARK_BG);
+        gfx_hline(ctx, 0, 122, SCREEN_W, CYB_DIM_BLUE);
+        gfx_text_scaled(ctx, 4, sm_y, "Abilities [B=Back]:", CYB_CYAN, 2);
+        sm_y += 18;
+        int ab_count = p->ability_count - 1; /* skip abilities[0] = Attack */
+        int sel_ab_id = -1;
+        /* Scroll window: keep cursor visible in 3-item window */
+        int ab_scroll = 0;
+        if (g->combat_sub >= 3) ab_scroll = g->combat_sub - 2;
+        if (ab_scroll > ab_count - 3) ab_scroll = ab_count - 3;
+        if (ab_scroll < 0) ab_scroll = 0;
+        /* Up arrow indicator */
+        if (ab_scroll > 0)
+            gfx_text_scaled(ctx, SCREEN_W / 2 - 4, sm_y - 2, "^", CYB_DIM_GREEN, 1);
+        int ab_vis = 0;
+        for (int i = ab_scroll; i < ab_count && ab_vis < 3; i++, ab_vis++) {
+            int ab_id = p->abilities[i + 1];  /* +1 to skip basic attack */
             const Ability *ab = &ALL_ABILITIES[ab_id];
             int ox = 8;
-            int oy = menu_y + i * 10;
-            int is_sel = (i == (g->combat_sub % 4));
+            int oy = sm_y + ab_vis * 18;
+            int is_sel = (i == g->combat_sub);
             uint16_t col = (p->energy >= ab->energy_cost) ? CYB_GREEN : CYB_DIM_GREEN;
             if (is_sel) {
-                gfx_rect_fill(ctx, ox - 2, oy - 1, 460, 10, CYB_SEL_BG);
-                gfx_text(ctx, ox, oy, ">", col);
+                gfx_rect_fill(ctx, ox - 2, oy - 1, SCREEN_W - 12, 17, CYB_SEL_BG);
+                gfx_text_scaled(ctx, ox, oy, ">", col, 2);
+                sel_ab_id = ab_id;
             }
-            gfx_printf(ctx, ox + 10, oy, col, "%s  [%dEN]  %s",
-                       ab->name, ab->energy_cost, ab->desc);
+            gfx_printf_scaled(ctx, ox + 18, oy, col, 2, "%s [%dEN]",
+                       ab->name, ab->energy_cost);
+        }
+        /* Down arrow indicator */
+        if (ab_scroll + 3 < ab_count)
+            gfx_text_scaled(ctx, SCREEN_W / 2 - 4, sm_y + 3 * 18, "v", CYB_DIM_GREEN, 1);
+        /* Show selected ability description */
+        if (sel_ab_id >= 0) {
+            const Ability *sab = &ALL_ABILITIES[sel_ab_id];
+            int desc_sc = ((int)strlen(sab->desc) <= 29) ? 2 : 1;
+            int desc_y = sm_y + 56;
+            gfx_text_scaled(ctx, 8, desc_y, sab->desc, CYB_CYAN, desc_sc);
         }
     } else if (g->combat_phase == COMBAT_ITEM) {
-        gfx_text(ctx, 4, menu_y, "Use Item [B=Back]:", CYB_CYAN);
-        menu_y += 10;
-        int shown = 0;
-        for (int i = 0; i < p->inv_count && shown < 4; i++) {
-            if (ALL_ITEMS[p->inventory[i]].type != ITEM_CONSUMABLE) continue;
-            int ox = 8;
-            int oy = menu_y + shown * 10;
-            int is_sel = (shown == g->combat_sub);
-            if (is_sel) {
-                gfx_rect_fill(ctx, ox - 2, oy - 1, 460, 10, CYB_SEL_BG);
-                gfx_text(ctx, ox, oy, ">", CYB_GREEN);
-            }
-            gfx_printf(ctx, ox + 10, oy,
-                       is_sel ? CYB_GREEN : CYB_DIM_GREEN,
-                       "%s - %s",
-                       ALL_ITEMS[p->inventory[i]].name,
-                       ALL_ITEMS[p->inventory[i]].desc);
-            shown++;
+        /* Sub-menu overlays player bar area for more room */
+        int sm_y = 124;
+        gfx_rect_fill(ctx, 0, 122, SCREEN_W, SCREEN_H - 122, CYB_DARK_BG);
+        gfx_hline(ctx, 0, 122, SCREEN_W, CYB_DIM_BLUE);
+        gfx_text_scaled(ctx, 4, sm_y, "Items [B=Back]:", CYB_CYAN, 2);
+        sm_y += 18;
+        /* Build filtered consumable list first */
+        int ci_indices[MAX_INVENTORY];
+        int ci_count = 0;
+        for (int i = 0; i < p->inv_count; i++) {
+            if (ALL_ITEMS[p->inventory[i]].type == ITEM_CONSUMABLE)
+                ci_indices[ci_count++] = i;
         }
-        if (shown == 0)
-            gfx_text(ctx, 16, menu_y, "No usable items!", CYB_DIM_GREEN);
+        int sel_item_id = -1;
+        /* Scroll window */
+        int ci_scroll = 0;
+        if (g->combat_sub >= 3) ci_scroll = g->combat_sub - 2;
+        if (ci_scroll > ci_count - 3) ci_scroll = ci_count - 3;
+        if (ci_scroll < 0) ci_scroll = 0;
+        /* Up arrow indicator */
+        if (ci_scroll > 0)
+            gfx_text_scaled(ctx, SCREEN_W / 2 - 4, sm_y - 2, "^", CYB_DIM_GREEN, 1);
+        int ci_vis = 0;
+        for (int i = ci_scroll; i < ci_count && ci_vis < 3; i++, ci_vis++) {
+            int inv_idx = ci_indices[i];
+            int ox = 8;
+            int oy = sm_y + ci_vis * 18;
+            int is_sel = (i == g->combat_sub);
+            uint16_t col = is_sel ? CYB_GREEN : CYB_DIM_GREEN;
+            if (is_sel) {
+                gfx_rect_fill(ctx, ox - 2, oy - 1, SCREEN_W - 12, 17, CYB_SEL_BG);
+                gfx_text_scaled(ctx, ox, oy, ">", col, 2);
+                sel_item_id = p->inventory[inv_idx];
+            }
+            gfx_text_scaled(ctx, ox + 18, oy, ALL_ITEMS[p->inventory[inv_idx]].name, col, 2);
+        }
+        /* Down arrow indicator */
+        if (ci_scroll + 3 < ci_count)
+            gfx_text_scaled(ctx, SCREEN_W / 2 - 4, sm_y + 3 * 18, "v", CYB_DIM_GREEN, 1);
+        if (ci_count == 0)
+            gfx_text_scaled(ctx, 16, sm_y, "No usable items!", CYB_DIM_GREEN, 2);
+        /* Show selected item description */
+        if (sel_item_id >= 0) {
+            const Item *si = &ALL_ITEMS[sel_item_id];
+            int desc_sc = ((int)strlen(si->desc) <= 29) ? 2 : 1;
+            int desc_y = sm_y + 56;
+            gfx_text_scaled(ctx, 8, desc_y, si->desc, CYB_CYAN, desc_sc);
+        }
     }
 
     /* ── Combat result messages ── */
@@ -1043,28 +1160,43 @@ static void render_inventory(GfxContext *gfx, const Game *g) {
         if (p->inv_count == 0) {
             gfx_text_scaled(gfx, 16, y, "Empty", CYB_DIM_GREEN, 2);
         } else {
-            for (int i = 0; i < p->inv_count && i < 8; i++) {
-                int is_sel = (i == g->inv_cursor);
+            int vis = 8;
+            int scroll = 0;
+            if (p->inv_count > vis && g->inv_cursor >= vis) {
+                scroll = g->inv_cursor - vis + 1;
+                if (scroll > p->inv_count - vis) scroll = p->inv_count - vis;
+            }
+            if (scroll > 0)
+                gfx_text_scaled(gfx, SCREEN_W - 24, y - 2, "^", CYB_DIM_GREEN, 2);
+            for (int i = 0; i < vis && (i + scroll) < p->inv_count; i++) {
+                int idx = i + scroll;
+                int is_sel = (idx == g->inv_cursor);
                 if (is_sel) {
                     gfx_rect_fill(gfx, 2, y - 1, SCREEN_W - 4, 18, CYB_SEL_BG);
                     gfx_text_scaled(gfx, 4, y, ">", CYB_GREEN, 2);
                 }
-                const Item *item = &ALL_ITEMS[p->inventory[i]];
+                const Item *item = &ALL_ITEMS[p->inventory[idx]];
                 uint16_t col = is_sel ? CYB_GREEN : CYB_DIM_GREEN;
                 gfx_printf_scaled(gfx, 22, y, col, 2, "%s", item->name);
                 if (item->type == ITEM_KEY)
                     gfx_text_scaled(gfx, 300, y, "[KEY]", CYB_YELLOW, 2);
                 y += 19;
             }
+            if (scroll + vis < p->inv_count)
+                gfx_text_scaled(gfx, SCREEN_W - 24, y - 2, "v", CYB_DIM_GREEN, 2);
         }
         /* Description of selected item */
         if (p->inv_count > 0 && g->inv_cursor < p->inv_count) {
-            gfx_rect_fill(gfx, 0, 196, SCREEN_W, 26, CYB_MSG_BG);
-            gfx_hline(gfx, 0, 196, SCREEN_W, CYB_DIM_BLUE);
+            gfx_rect_fill(gfx, 0, 182, SCREEN_W, 40, CYB_MSG_BG);
+            gfx_hline(gfx, 0, 182, SCREEN_W, CYB_DIM_BLUE);
             const Item *sel = &ALL_ITEMS[p->inventory[g->inv_cursor]];
-            gfx_text(gfx, 4, 200, sel->desc, CYB_CYAN);
+            int desc_sc = ((int)strlen(sel->desc) <= 29) ? 2 : 1;
+            int desc_y = (desc_sc == 2) ? 184 : 188;
+            gfx_text_scaled(gfx, 4, desc_y, sel->desc, CYB_CYAN, desc_sc);
             if (sel->type == ITEM_CONSUMABLE)
-                gfx_text(gfx, 4, 210, "[A] Use", CYB_GREEN);
+                gfx_text_scaled(gfx, 4, 204, "[A] Use", CYB_GREEN, 2);
+            else if (sel->type == ITEM_WEAPON || sel->type == ITEM_ARMOR || sel->type == ITEM_IMPLANT)
+                gfx_text_scaled(gfx, 4, 204, "[A] Equip", CYB_GREEN, 2);
         }
     } else if (g->inv_tab == 1) {
         /* EQUIP tab */
@@ -1120,10 +1252,22 @@ static void render_inventory(GfxContext *gfx, const Game *g) {
         y += 28;
 
         gfx_text_scaled(gfx, 4, y, "Known Abilities:", CYB_CYAN, 2); y += 22;
-        for (int i = 0; i < p->ability_count; i++) {
-            gfx_printf_scaled(gfx, 12, y, CYB_GREEN, 2, "- %s",
-                       ALL_ABILITIES[p->abilities[i]].name);
-            y += 20;
+        {
+            int vis = 3;
+            int scroll = g->inv_cursor;
+            int max_scroll = p->ability_count > vis ? p->ability_count - vis : 0;
+            if (scroll > max_scroll) scroll = max_scroll;
+            if (scroll < 0) scroll = 0;
+            int ab_y = y;
+            for (int i = scroll; i < p->ability_count && i < scroll + vis; i++) {
+                gfx_printf_scaled(gfx, 12, ab_y, CYB_GREEN, 2, "- %s",
+                           ALL_ABILITIES[p->abilities[i]].name);
+                ab_y += 20;
+            }
+            if (scroll > 0)
+                gfx_text(gfx, SCREEN_W - 16, y - 2, "^", CYB_DIM_GREEN);
+            if (scroll + vis < p->ability_count)
+                gfx_text(gfx, SCREEN_W - 16, ab_y - 6, "v", CYB_DIM_GREEN);
         }
     }
 }
@@ -1214,11 +1358,7 @@ static void render_shop(GfxContext *gfx, const Game *g) {
     gfx_hline(gfx, 0, 182, SCREEN_W, CYB_DIM_BLUE);
     if (g->shop_count > 0) {
         const Item *sel = &ALL_ITEMS[g->shop_list[g->shop_cursor]];
-        if (sel->type == ITEM_WEAPON || sel->type == ITEM_ARMOR)
-            gfx_printf_scaled(gfx, 4, 184, CYB_CYAN, 2, "+%d %s - %s",
-                       sel->value, sel->type == ITEM_WEAPON ? "ATK" : "DEF", sel->desc);
-        else
-            gfx_text_scaled(gfx, 4, 184, sel->desc, CYB_CYAN, 2);
+        gfx_text_scaled(gfx, 4, 184, sel->desc, CYB_CYAN, 2);
     }
     gfx_text_scaled(gfx, 4, 204, "[A] Buy  [B] Leave", CYB_DIM_GREEN, 2);
 }
@@ -1244,16 +1384,19 @@ static void render_terminal_screen(GfxContext *gfx, const Game *g) {
 
     if (g->term_idx >= 0 && g->term_idx < (int)NUM_TERMINALS) {
         const TerminalData *td = &TERMINALS[g->term_idx];
-        int y = 46;
+        int y = 44;
         for (int i = 0; i <= g->term_line && i < 4; i++) {
-            gfx_text(gfx, 20, y, td->lines[i], CYB_GREEN);
-            y += 18;
+            /* Auto-scale: scale 2 if fits (28 chars), else scale 1 */
+            int sc = ((int)strlen(td->lines[i]) <= 28) ? 2 : 1;
+            int ly = (sc == 2) ? y : y + 4;
+            gfx_text_scaled(gfx, 20, ly, td->lines[i], CYB_GREEN, sc);
+            y += 22;
         }
 
         if (g->term_line < 3)
-            gfx_text(gfx, 20, SCREEN_H - 36, "[A] Continue...", CYB_DIM_GREEN);
+            gfx_text_scaled(gfx, 20, SCREEN_H - 36, "[A] Continue...", CYB_DIM_GREEN, 2);
         else
-            gfx_text(gfx, 20, SCREEN_H - 36, "[A] Disconnect", CYB_DIM_GREEN);
+            gfx_text_scaled(gfx, 20, SCREEN_H - 36, "[A] Disconnect", CYB_DIM_GREEN, 2);
     }
 }
 
@@ -1310,6 +1453,9 @@ static void render_title(GfxContext *gfx, const Game *g) {
 
     /* Credit — scale 2 */
     gfx_text_centered_scaled(gfx, 192, "by Hexxed BitHeadz", CYB_DIM_BLUE, 2);
+
+    /* Version */
+    gfx_text(gfx, SCREEN_W - 50, SCREEN_H - 10, "v1.0.0", CYB_DIM_GREEN);
 }
 
 /* ════════════════════════════════════════════════════════════════════ */
@@ -1520,7 +1666,7 @@ static void handle_explore_input(Engine *engine, Game *g) {
                         { ITEM_HEALTH_PATCH_P, ITEM_FULL_RESTORE, ITEM_MILITARY_DECK },
                         { ITEM_FULL_RESTORE, ITEM_MILITARY_DECK, ITEM_ADAPTIVE_FW },
                         { ITEM_FULL_RESTORE, ITEM_QUANTUM_DECK, ITEM_QUANTUM_FW },
-                        { ITEM_FULL_RESTORE, ITEM_VOID_DECK, ITEM_BLACK_ICE_FW },
+                        { ITEM_FULL_RESTORE, ITEM_VOID_DECK, ITEM_PHANTOM_FW },
                     };
                     int map_idx = clamp(p->current_map, 0, 5);
                     int loot_id = loot_table[map_idx][rng(0, 2)];
@@ -1662,16 +1808,16 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
                 case 0: { /* Attack (use basic Ping) */
                     int dmg = do_player_attack(g, p->abilities[0]);
                     sfx_hit();
-                    snprintf(g->combat_msg, MAX_MSG, "%s for %d damage!",
-                             ALL_ABILITIES[p->abilities[0]].name, dmg);
+                    snprintf(g->combat_msg, MAX_MSG, "Attack: %d dmg!", dmg);
                     g->combat_phase = COMBAT_RESULT;
                     g->combat_msg_timer = 45;
 
-                    /* Enemy turn */
+                    /* Queue enemy turn for after player sees their result */
                     if (e->hp > 0) {
-                        do_enemy_attack(g);
+                        g->enemy_turn_pending = 1;
+                    } else {
+                        process_turn_end(g);
                     }
-                    process_turn_end(g);
                     break;
                 }
                 case 1: /* Abilities sub-menu */
@@ -1691,33 +1837,39 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
                         snprintf(g->combat_msg, MAX_MSG, "Can't escape!");
                         g->combat_phase = COMBAT_RESULT;
                         g->combat_msg_timer = 30;
-                        do_enemy_attack(g);
-                        process_turn_end(g);
+                        g->enemy_turn_pending = 1;
                     }
                     break;
                 }
             }
         }
     } else if (g->combat_phase == COMBAT_ABILITY) {
+        int ab_count = p->ability_count - 1; /* skip abilities[0] = Attack */
+        if (ab_count < 1) {
+            snprintf(g->combat_msg, MAX_MSG, "No abilities learned yet!");
+            g->combat_msg_timer = 30;
+            g->combat_phase = COMBAT_MENU;
+            return;
+        }
         if (input_pressed(inp, BTN_UP)) {
-            g->combat_sub = (g->combat_sub + p->ability_count - 1) % p->ability_count;
+            g->combat_sub = (g->combat_sub + ab_count - 1) % ab_count;
             sfx_select();
         }
         if (input_pressed(inp, BTN_DOWN)) {
-            g->combat_sub = (g->combat_sub + 1) % p->ability_count;
+            g->combat_sub = (g->combat_sub + 1) % ab_count;
             sfx_select();
         }
         if (input_pressed(inp, BTN_B)) {
             g->combat_phase = COMBAT_MENU;
         }
         if (input_pressed(inp, BTN_A)) {
-            int ab_id = p->abilities[g->combat_sub];
+            int ab_id = p->abilities[g->combat_sub + 1]; /* +1 to skip basic attack */
             const Ability *ab = &ALL_ABILITIES[ab_id];
             if (p->energy >= ab->energy_cost) {
                 int dmg = do_player_attack(g, ab_id);
                 sfx_hit();
                 if (ab->base_damage > 0)
-                    snprintf(g->combat_msg, MAX_MSG, "%s for %d damage!", ab->name, dmg);
+                    snprintf(g->combat_msg, MAX_MSG, "%s: %d dmg!", ab->name, dmg);
                 else if (ab->heal_amount > 0)
                     snprintf(g->combat_msg, MAX_MSG, "%s: +%d HP!", ab->name, ab->heal_amount);
                 else
@@ -1725,8 +1877,11 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
 
                 g->combat_phase = COMBAT_RESULT;
                 g->combat_msg_timer = 45;
-                if (e->hp > 0) do_enemy_attack(g);
-                process_turn_end(g);
+                if (e->hp > 0) {
+                    g->enemy_turn_pending = 1;
+                } else {
+                    process_turn_end(g);
+                }
             } else {
                 snprintf(g->combat_msg, MAX_MSG, "Not enough Energy!");
                 g->combat_msg_timer = 30;
@@ -1763,8 +1918,8 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
                 p->hp = p->max_hp;
                 p->energy = p->max_energy;
             } else if (item_id == ITEM_STIM_PACK) {
-                p->hp = clamp(p->hp + 5, 0, p->max_hp);
-                /* Cure stun (player stun not implemented but future-proof) */
+                p->atk_buff_turns = 3;
+                p->def_buff_turns = 3;
             } else if (item->value > 0 && (item_id == ITEM_ENERGY_CELL ||
                        item_id == ITEM_ENERGY_CELL_P)) {
                 p->energy = clamp(p->energy + item->value, 0, p->max_energy);
@@ -1782,14 +1937,27 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
 
             g->combat_phase = COMBAT_RESULT;
             g->combat_msg_timer = 30;
-            do_enemy_attack(g);
-            process_turn_end(g);
+            g->enemy_turn_pending = 1;
         }
     } else if (g->combat_phase == COMBAT_RESULT) {
         if (g->combat_msg_timer > 0) g->combat_msg_timer--;
         if (g->combat_msg_timer == 0 || input_pressed(inp, BTN_A)) {
-            g->combat_phase = COMBAT_MENU;
-            g->combat_msg[0] = '\0';
+            if (g->enemy_turn_pending) {
+                /* Now execute enemy's attack and show the result */
+                g->enemy_turn_pending = 0;
+                do_enemy_attack(g);
+                process_turn_end(g);
+                /* Stay in COMBAT_RESULT to show enemy's message */
+                /* (process_turn_end may have changed phase to VICTORY/DEFEAT) */
+                if (g->combat_phase != COMBAT_VICTORY &&
+                    g->combat_phase != COMBAT_DEFEAT) {
+                    g->combat_phase = COMBAT_RESULT;
+                    g->combat_msg_timer = 45;
+                }
+            } else {
+                g->combat_phase = COMBAT_MENU;
+                g->combat_msg[0] = '\0';
+            }
         }
     } else if (g->combat_phase == COMBAT_VICTORY) {
         if (input_pressed(inp, BTN_A)) {
@@ -1846,6 +2014,9 @@ static void handle_inventory_input(Game *g, const InputContext *inp) {
                 if (item_id == ITEM_FULL_RESTORE) {
                     p->hp = p->max_hp;
                     p->energy = p->max_energy;
+                } else if (item_id == ITEM_STIM_PACK) {
+                    p->atk_buff_turns = 3;
+                    p->def_buff_turns = 3;
                 } else if (item_id == ITEM_ENERGY_CELL || item_id == ITEM_ENERGY_CELL_P) {
                     p->energy = clamp(p->energy + item->value, 0, p->max_energy);
                 } else {
@@ -1859,15 +2030,57 @@ static void handle_inventory_input(Game *g, const InputContext *inp) {
                 if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
                     g->inv_cursor--;
             } else if (item->type == ITEM_WEAPON) {
+                int old = p->weapon;
                 p->weapon = item_id;
+                if (old >= 0) {
+                    p->inventory[g->inv_cursor] = old; /* swap */
+                } else {
+                    for (int j = g->inv_cursor; j < p->inv_count - 1; j++)
+                        p->inventory[j] = p->inventory[j + 1];
+                    p->inv_count--;
+                    if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
+                        g->inv_cursor--;
+                }
                 sfx_select();
             } else if (item->type == ITEM_ARMOR) {
+                int old = p->armor;
                 p->armor = item_id;
+                if (old >= 0) {
+                    p->inventory[g->inv_cursor] = old; /* swap */
+                } else {
+                    for (int j = g->inv_cursor; j < p->inv_count - 1; j++)
+                        p->inventory[j] = p->inventory[j + 1];
+                    p->inv_count--;
+                    if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
+                        g->inv_cursor--;
+                }
                 sfx_select();
             } else if (item->type == ITEM_IMPLANT) {
+                int old = p->implant;
                 p->implant = item_id;
+                if (old >= 0) {
+                    p->inventory[g->inv_cursor] = old; /* swap */
+                } else {
+                    for (int j = g->inv_cursor; j < p->inv_count - 1; j++)
+                        p->inventory[j] = p->inventory[j + 1];
+                    p->inv_count--;
+                    if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
+                        g->inv_cursor--;
+                }
                 sfx_select();
             }
+        }
+    } else if (g->inv_tab == 2) {
+        /* Stats tab — scroll abilities list */
+        int vis = 3;
+        int max_scroll = p->ability_count > vis ? p->ability_count - vis : 0;
+        if (input_pressed(inp, BTN_UP) && g->inv_cursor > 0) {
+            g->inv_cursor--;
+            sfx_select();
+        }
+        if (input_pressed(inp, BTN_DOWN) && g->inv_cursor < max_scroll) {
+            g->inv_cursor++;
+            sfx_select();
         }
     }
 
@@ -1897,10 +2110,23 @@ static void handle_dialogue_input(Game *g, const InputContext *inp) {
                     set_msg(g, "Come back when you have", "the required item.");
                     g->npc_gifted[npc_key] = 0; /* Reset so they can try again */
                 } else {
-                    if (npc->gives_ability >= 0)
+                    char line1[MAX_MSG] = "";
+                    char line2[MAX_MSG] = "";
+                    if (npc->gives_ability >= 0) {
                         player_learn_ability(g, npc->gives_ability);
-                    if (npc->gives_item >= 0)
+                        snprintf(line1, MAX_MSG, "Learned: %s", ALL_ABILITIES[npc->gives_ability].name);
+                    }
+                    if (npc->gives_item >= 0) {
                         player_add_item(g, npc->gives_item);
+                        snprintf(line2, MAX_MSG, "Received: %s", ALL_ITEMS[npc->gives_item].name);
+                    }
+                    /* Show what was given — put ability in line1, item in line2 */
+                    if (line1[0] && line2[0])
+                        set_msg(g, line1, line2);
+                    else if (line1[0])
+                        set_msg(g, line1, "");
+                    else if (line2[0])
+                        set_msg(g, line2, "");
                 }
             }
 
@@ -1929,7 +2155,10 @@ static void handle_shop_input(Game *g, const InputContext *inp) {
         int item_id = g->shop_list[g->shop_cursor];
         const Item *item = &ALL_ITEMS[item_id];
 
-        if (p->credits >= item->price && p->inv_count < MAX_INVENTORY) {
+        /* Prevent buying duplicate implant */
+        if (item->type == ITEM_IMPLANT && p->implant == item_id) {
+            /* Already installed — do nothing */
+        } else if (p->credits >= item->price && p->inv_count < MAX_INVENTORY) {
             p->credits -= item->price;
 
             if (item->type == ITEM_WEAPON) {
@@ -2001,13 +2230,21 @@ static void handle_pause_input(Engine *engine, Game *g) {
                 update_hw_leds(g);
                 break;
             case 1: /* Quick heal (if at heal station) */
-                g->player.hp = g->player.max_hp;
-                g->player.energy = g->player.max_energy;
-                sfx_heal();
-                set_msg(g, "Emergency reboot: Restored!", NULL);
+            {
+                MapData *m = &MAPS[g->player.current_map];
+                char tile = m->tiles[g->player.y][g->player.x];
+                if (tile == TILE_HEAL) {
+                    g->player.hp = g->player.max_hp;
+                    g->player.energy = g->player.max_energy;
+                    sfx_heal();
+                    set_msg(g, "Emergency reboot: Restored!", NULL);
+                } else {
+                    set_msg(g, "No heal station nearby!", NULL);
+                }
                 g->state = STATE_EXPLORE;
                 update_hw_leds(g);
                 break;
+            }
             case 2: /* Quit to title */
                 save_game(g);
                 g->state = STATE_TITLE;
@@ -2124,7 +2361,8 @@ static void game_update(Engine *engine, float dt, void *userdata) {
         g->combat_phase == COMBAT_VICTORY &&
         g->enemy.is_boss &&
         g->player.current_map == 5) {
-        /* Beat ARIA — game complete! */
+        /* Award rewards before transitioning to victory screen */
+        combat_victory(g);
         g->state = STATE_VICTORY;
         sfx_victory();
         hw_play_rtttl("Victory:d=4,o=5,b=200:c,e,g,8c6,4e6,2g6");
@@ -2177,10 +2415,14 @@ static void game_render(Engine *engine, void *userdata) {
             break;
     }
 
-    /* Screen flash effect */
+    /* Screen flash effect — subtle red border (top + bottom + sides) */
     if (g->flash_frames > 0) {
-        gfx_rect_fill(gfx, 0, 0, SCREEN_W, SCREEN_H,
-                       (uint16_t)g->flash_color);
+        uint16_t fc = (uint16_t)g->flash_color;
+        int t = 4;  /* border thickness */
+        gfx_rect_fill(gfx, 0, 0, SCREEN_W, t, fc);              /* top */
+        gfx_rect_fill(gfx, 0, SCREEN_H - t, SCREEN_W, t, fc);   /* bottom */
+        gfx_rect_fill(gfx, 0, 0, t, SCREEN_H, fc);              /* left */
+        gfx_rect_fill(gfx, SCREEN_W - t, 0, t, SCREEN_H, fc);   /* right */
         g->flash_frames--;
     }
 }

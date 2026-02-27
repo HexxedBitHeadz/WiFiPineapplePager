@@ -84,7 +84,7 @@ static const Ability ALL_ABILITIES[] = {
     { "Rootkit",          10,  5,   0,  FX_DOT,        "Persistent damage, 3 turns" },
     { "Zero Day",         20, 40,   0,  FX_PIERCE,     "Devastating unknown exploit" },
     { "Patch",             8,  0,  25,  FX_NONE,       "Emergency system repair" },
-    { "ICE Shield",       12,  0,   0,  FX_SHIELD,     "Absorb the next attack" },
+    { "Aegis Shield",     12,  0,   0,  FX_SHIELD,     "Absorb the next attack" },
     { "Overclock",         6,  0,   0,  FX_BUFF_ATK,   "Boost attack for 3 turns" },
     { "Decrypt",          10, 15,   0,  FX_DEBUFF_DEF, "Strip enemy encryption" },
 };
@@ -118,7 +118,7 @@ static const Item ALL_ITEMS[] = {
     { "Energy Cell",      ITEM_CONSUMABLE,  15,  12, "Restores 15 Energy" },
     { "Energy Cell+",     ITEM_CONSUMABLE,  40,  35, "Restores 40 Energy" },
     { "Full Restore",     ITEM_CONSUMABLE, 999, 100, "Fully restores HP + Energy" },
-    { "Stim Pack",        ITEM_CONSUMABLE,   5,  25, "Cures stun, restores 5 HP" },
+    { "Stim Pack",        ITEM_CONSUMABLE,   5,  25, "+5 ATK & DEF for 3 turns" },
 
     /* ── Weapons (Decks) ── */
     { "Basic Deck",       ITEM_WEAPON,       3,   0, "Standard-issue hacking deck" },
@@ -128,11 +128,11 @@ static const Item ALL_ITEMS[] = {
     { "Void Deck",        ITEM_WEAPON,      22,   0, "+22 ATK - Legendary prototype" },
 
     /* ── Armor (Firewalls) ── */
-    { "Basic Firewall",   ITEM_ARMOR,        2,   0, "Standard packet filter" },
+    { "Basic FW",         ITEM_ARMOR,        2,   0, "Standard packet filter" },
     { "Hardened FW",      ITEM_ARMOR,        5,  50, "+5 DEF - Hardened rules" },
     { "Adaptive FW",      ITEM_ARMOR,        9, 130, "+9 DEF - AI-driven filtering" },
     { "Quantum FW",       ITEM_ARMOR,       14, 350, "+14 DEF - Quantum encryption" },
-    { "Black ICE FW",     ITEM_ARMOR,       20,   0, "+20 DEF - Counterattack layer" },
+    { "Phantom FW",       ITEM_ARMOR,       20,   0, "+20 DEF - Counterattack layer" },
 
     /* ── Implants ── */
     { "Neural Jack",      ITEM_IMPLANT,      5,  80, "+5 Max Energy" },
@@ -163,7 +163,7 @@ static const Item ALL_ITEMS[] = {
 #define ITEM_HARDENED_FW     12
 #define ITEM_ADAPTIVE_FW     13
 #define ITEM_QUANTUM_FW      14
-#define ITEM_BLACK_ICE_FW    15
+#define ITEM_PHANTOM_FW      15
 #define ITEM_NEURAL_JACK     16
 #define ITEM_REFLEX_BOOSTER  17
 #define ITEM_CORTEX_CHIP     18
@@ -193,12 +193,12 @@ static const EnemyTemplate ENEMY_TEMPLATES[] = {
     /* name               HP   ATK DEF SPD  EXP  $   loot             %   color   glyph */
     { "Sentry Bot",       25,   6,  2,  3,  10,  8,  ITEM_HEALTH_PATCH, 40, 0x07E0, 's' },
     { "Firewall Node",    40,   4,  8,  1,  15, 12,  ITEM_ENERGY_CELL,  35, 0x001F, 'f' },
-    { "ICE Drone",        35,   9,  3,  5,  20, 15,  ITEM_HEALTH_PATCH, 30, 0x07FF, 'd' },
+    { "RF Drone",        35,   9,  3,  5,  20, 15,  ITEM_HEALTH_PATCH, 30, 0x07FF, 'd' },
     { "Corp Guard",       50,  11,  6,  4,  30, 25,  ITEM_STIM_PACK,    25, 0xF800, 'g' },
     { "Data Wisp",        20,   7,  1,  8,  12, 20,  ITEM_ENERGY_CELL_P,30, 0xFFE0, 'w' },
     { "Rogue AI",         60,  14,  7,  6,  45, 35,  ITEM_HEALTH_PATCH_P,20, 0xF81F, 'a' },
     { "Crypto Miner",     45,   8, 10,  2,  25, 50,  -1,                 0, 0x8410, 'm' },
-    { "Black ICE",       100,  18, 12,  5,  80, 60,  ITEM_MODDED_DECK,  15, 0x780F, 'I' },
+    { "Phantom",         100,  18, 12,  5,  80, 60,  ITEM_MODDED_DECK,  15, 0x780F, 'P' },
     /* Bosses */
     { "Sec Chief Kira",  120,  16, 10,  7, 120, 100, ITEM_SERVER_KEY,  100, 0xFD20, 'K' },
     { "Megacorp AI ARIA",200,  24, 15,  8, 300, 500, ITEM_ENCRYPTED_DRIVE,100,0xFFFF,'A' },
@@ -211,7 +211,7 @@ static const EnemyTemplate ENEMY_TEMPLATES[] = {
 #define ENEMY_WISP         4
 #define ENEMY_ROGUE_AI     5
 #define ENEMY_CRYPTO_MINER 6
-#define ENEMY_BLACK_ICE    7
+#define ENEMY_PHANTOM      7
 #define ENEMY_BOSS_KIRA    8
 #define ENEMY_BOSS_ARIA    9
 #define NUM_ENEMIES (sizeof(ENEMY_TEMPLATES) / sizeof(ENEMY_TEMPLATES[0]))
@@ -279,7 +279,7 @@ static MapData MAPS[MAX_MAPS] = {
             "#..##..#....##....##.N.#",
             "#......#....##.........#",
             "#..+...#...............#",
-            "#......D.......T.......#",
+            "#......D.......T...V...#",
             "#..##..#..............C#",
             "#..##..#...............#",
             "########################",
@@ -339,7 +339,7 @@ static MapData MAPS[MAX_MAPS] = {
             "#..##..#...##..##..##..#",
             "#......#...##..##..##..#",
             "#..+...#...............#",
-            "#......D.....V........>#",
+            "#......D..............>#",
             "#..##..#...............#",
             "#..##..#..........N...C#",
             "########################",
@@ -402,15 +402,15 @@ static MapData MAPS[MAX_MAPS] = {
             "#....~~~~~....##..##...#",
             "#.............##..##...#",
             "#..T...................#",
-            "#..............+......C#",
+            "#..V...........+......C#",
             "########################",
         },
         .player_start_x = 1, .player_start_y = 1,
         .next_map = 3, .prev_map = 1,
         .enemies = {
             { ENEMY_GUARD,    10, 2, 1 },
-            { ENEMY_DRONE,    18, 4, 1 },
-            { ENEMY_GUARD,    15, 7, 1 },
+            { ENEMY_DRONE,    15, 4, 1 },
+            { ENEMY_GUARD,    13, 7, 1 },
             { ENEMY_ROGUE_AI,  5, 8, 1 },
         },
         .enemy_count = 4,
@@ -434,7 +434,7 @@ static MapData MAPS[MAX_MAPS] = {
             "#..................##..#",
             "#..~~..............##..#",
             "#..~~....##............#",
-            "#........##....B......>#",
+            "#........##......B....>#",
             "#...........+.........#",
             "#..C...................#",
             "########################",
@@ -442,9 +442,9 @@ static MapData MAPS[MAX_MAPS] = {
         .player_start_x = 1, .player_start_y = 1,
         .next_map = 4, .prev_map = 2,
         .enemies = {
-            { ENEMY_GUARD,     12, 3, 1 },
-            { ENEMY_ROGUE_AI,  18, 5, 1 },
-            { ENEMY_BLACK_ICE,  8, 6, 1 },
+            { ENEMY_GUARD,     13, 3, 1 },
+            { ENEMY_ROGUE_AI,  17, 5, 1 },
+            { ENEMY_PHANTOM,   8, 6, 1 },
             { ENEMY_BOSS_KIRA, 17, 7, 1 },  /* Boss! */
         },
         .enemy_count = 4,
@@ -453,7 +453,7 @@ static MapData MAPS[MAX_MAPS] = {
         .floor_color = 0x1082,
         .wall_color  = 0x528A,
         .encounter_rate = 20,
-        .random_enemies = { ENEMY_GUARD, ENEMY_ROGUE_AI, ENEMY_BLACK_ICE },
+        .random_enemies = { ENEMY_GUARD, ENEMY_ROGUE_AI, ENEMY_PHANTOM },
         .random_enemy_count = 3,
     },
 
@@ -468,17 +468,17 @@ static MapData MAPS[MAX_MAPS] = {
             "#......................#",
             "#..##..##..##..##..##..#",
             "#..##..##..##..##..##..#",
-            "#..............N......>#",
-            "#..+...................#",
+            "#................N....>#",
+            "#..+..........V........#",
             "#..C...................#",
             "########################",
         },
         .player_start_x = 1, .player_start_y = 1,
         .next_map = 5, .prev_map = 3,
         .enemies = {
-            { ENEMY_BLACK_ICE, 10, 4, 1 },
+            { ENEMY_PHANTOM, 10, 4, 1 },
             { ENEMY_ROGUE_AI,  16, 4, 1 },
-            { ENEMY_BLACK_ICE, 12, 8, 1 },
+            { ENEMY_PHANTOM, 12, 8, 1 },
         },
         .enemy_count = 3,
         .npcs = {
@@ -501,7 +501,7 @@ static MapData MAPS[MAX_MAPS] = {
         .floor_color = 0x0841,
         .wall_color  = 0x2945,
         .encounter_rate = 22,
-        .random_enemies = { ENEMY_BLACK_ICE, ENEMY_ROGUE_AI, ENEMY_GUARD },
+        .random_enemies = { ENEMY_PHANTOM, ENEMY_ROGUE_AI, ENEMY_GUARD },
         .random_enemy_count = 3,
     },
 
@@ -524,9 +524,9 @@ static MapData MAPS[MAX_MAPS] = {
         .player_start_x = 1, .player_start_y = 1,
         .next_map = -1, .prev_map = 4,  /* no next map — game ends */
         .enemies = {
-            { ENEMY_BLACK_ICE,   6, 4, 1 },
-            { ENEMY_BLACK_ICE,  18, 4, 1 },
-            { ENEMY_ROGUE_AI,    6, 7, 1 },
+            { ENEMY_PHANTOM,   5, 4, 1 },
+            { ENEMY_PHANTOM,  18, 4, 1 },
+            { ENEMY_ROGUE_AI,    5, 7, 1 },
             { ENEMY_ROGUE_AI,   18, 7, 1 },
             { ENEMY_BOSS_ARIA,  11, 9, 1 },  /* Final Boss! */
         },
@@ -536,7 +536,7 @@ static MapData MAPS[MAX_MAPS] = {
         .floor_color = 0x0000,
         .wall_color  = 0x780F,  /* purple walls */
         .encounter_rate = 25,
-        .random_enemies = { ENEMY_BLACK_ICE, ENEMY_ROGUE_AI },
+        .random_enemies = { ENEMY_PHANTOM, ENEMY_ROGUE_AI },
         .random_enemy_count = 2,
     },
 };
@@ -575,6 +575,7 @@ typedef struct {
 
     /* Combat buffs (turns remaining) */
     int  atk_buff_turns;
+    int  def_buff_turns;
     int  shield_active;
     int  dot_damage;
     int  dot_turns;
@@ -704,9 +705,9 @@ static const TerminalData TERMINALS[] = {
         0, 15, 7,  /* Neon Slums */
         {
             "> ACCESSING LOCAL NODE...",
-            "> Packet Injection module found.",
-            "> Downloading exploit code...",
-            "> SKILL LEARNED: Packet Inject",
+            "> Packet Injection found.",
+            "> Downloading exploit...",
+            "> LEARNED: Packet Inject",
         },
         2, /* Packet Inject */
     },
@@ -716,7 +717,7 @@ static const TerminalData TERMINALS[] = {
             "> DECRYPTING DATA CACHE...",
             "> Firewall Bypass technique",
             "> extracted from stolen DB.",
-            "> SKILL LEARNED: FW Bypass",
+            "> LEARNED: FW Bypass",
         },
         4, /* Firewall Bypass */
     },
@@ -725,8 +726,8 @@ static const TerminalData TERMINALS[] = {
         {
             "> CORP NETWORK ACCESSED...",
             "> Rootkit deployment module",
-            "> loaded from compromised node.",
-            "> SKILL LEARNED: Rootkit",
+            "> loaded from corp node.",
+            "> LEARNED: Rootkit",
         },
         6, /* Rootkit */
     },
@@ -736,7 +737,7 @@ static const TerminalData TERMINALS[] = {
             "> MEDICAL SUBROUTINE FOUND",
             "> Emergency patch protocol",
             "> downloaded to your deck.",
-            "> SKILL LEARNED: Patch",
+            "> LEARNED: Patch",
         },
         8, /* Patch */
     },
@@ -746,7 +747,7 @@ static const TerminalData TERMINALS[] = {
             "> SEC OVERRIDE DETECTED...",
             "> Buffer Overflow exploit",
             "> compiled and ready.",
-            "> SKILL LEARNED: Buffer Overflow",
+            "> LEARNED: Buffer Overflow",
         },
         5, /* Buffer Overflow */
     },
@@ -754,18 +755,18 @@ static const TerminalData TERMINALS[] = {
         4, 7, 1,   /* Server Farm */
         {
             "> DEFENSIVE PROTOCOL FOUND",
-            "> ICE Shield module loaded.",
-            "> Absorbs one incoming attack.",
-            "> SKILL LEARNED: ICE Shield",
+            "> Aegis Shield loaded.",
+            "> Absorbs next attack.",
+            "> LEARNED: Aegis Shield",
         },
-        9, /* ICE Shield */
+        9, /* Aegis Shield */
     },
     {
         5, 11, 1,  /* Mainframe Core */
         {
             "> FINAL PROTOCOL UNLOCKED",
             "> Overclock: boost systems",
-            "> Decrypt: strip enemy armor",
+            "> Decrypt: strip armor",
             "> 2 SKILLS LEARNED!",
         },
         10, /* Overclock (Decrypt given as bonus) */

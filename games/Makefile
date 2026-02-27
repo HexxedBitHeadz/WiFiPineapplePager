@@ -27,7 +27,7 @@ endif
 PAGER_HOST ?= root@172.16.52.1
 PAGER_DIR  ?= /root/games
 
-# SSH multiplexing — enter password ONCE, reuse for all commands
+# SSH multiplexing — enter pager password, reuse for all commands
 SSH_SOCK  ?= /tmp/pager-ssh-sock
 SSH_OPTS  ?= -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=$(SSH_SOCK) -o ControlPersist=300
 
@@ -73,11 +73,11 @@ netrunner/netrunner: netrunner/netrunner.c netrunner/game_data.h engine/pager_en
 	$(STRIP) $@
 	@echo "[OK] netrunner"
 
-# ── SSH Connection (enter password once) ───────────────────────────
+# ── SSH Connection (enter pager password) ───────────────────────────
 
 ssh-open:
 	@if [ ! -S $(SSH_SOCK) ]; then \
-		echo "=== Opening SSH connection (enter password once) ==="; \
+		echo "=== Opening SSH connection (enter pager pasword) ==="; \
 		ssh -o StrictHostKeyChecking=no -o ControlMaster=yes -o ControlPath=$(SSH_SOCK) -o ControlPersist=300 -fN $(PAGER_HOST); \
 	else \
 		echo "=== SSH connection already open ==="; \

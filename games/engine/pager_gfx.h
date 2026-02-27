@@ -91,12 +91,14 @@ typedef struct {
     int       fb_fd;         /* framebuffer file descriptor */
     uint16_t *fb_ptr;        /* mmap'd framebuffer */
     uint16_t *backbuf;       /* off-screen back buffer */
+    uint16_t *prevbuf;       /* previous frame for dirty-checking */
     int       width;         /* virtual width  (game sees this — always landscape) */
     int       height;        /* virtual height (game sees this — always landscape) */
     int       stride;        /* bytes per row in the real FB */
     int       fb_width;      /* real FB xres */
     int       fb_height;     /* real FB yres */
     int       rotated;       /* 1 if we detected portrait FB and rotate to landscape */
+    int       frame_dirty;   /* 1 if backbuf differs from prevbuf */
 } GfxContext;
 
 /* ── Function Prototypes ────────────────────────────────────────────── */
@@ -325,6 +327,17 @@ int gfx_init(GfxContext *ctx) {
         return -1;
     }
 
+    /* Previous frame buffer for dirty-checking (skip flip when unchanged) */
+    ctx->prevbuf = (uint16_t *)calloc(ctx->width * ctx->height, sizeof(uint16_t));
+    if (!ctx->prevbuf) {
+        perror("gfx_init: calloc prevbuf");
+        free(ctx->backbuf);
+        munmap(ctx->fb_ptr, fb_size);
+        close(ctx->fb_fd);
+        return -1;
+    }
+    ctx->frame_dirty = 1; /* first frame is always dirty */
+
     fprintf(stderr, "[gfx] Initialized: %dx%d @ %d bpp (stride=%d, rotated=%d)\n",
             ctx->width, ctx->height, vinfo.bits_per_pixel, ctx->stride, ctx->rotated);
     return 0;
@@ -334,6 +347,10 @@ void gfx_cleanup(GfxContext *ctx) {
     if (ctx->backbuf) {
         free(ctx->backbuf);
         ctx->backbuf = NULL;
+    }
+    if (ctx->prevbuf) {
+        free(ctx->prevbuf);
+        ctx->prevbuf = NULL;
     }
     if (ctx->fb_ptr && ctx->fb_ptr != MAP_FAILED) {
         munmap(ctx->fb_ptr, ctx->stride * ctx->fb_height);
@@ -346,6 +363,20 @@ void gfx_cleanup(GfxContext *ctx) {
 }
 
 void gfx_flip(GfxContext *ctx) {
+    /* Dirty-check: compare backbuf to previous frame, skip if identical */
+    size_t buf_bytes = (size_t)ctx->width * ctx->height * sizeof(uint16_t);
+    if (ctx->prevbuf && memcmp(ctx->backbuf, ctx->prevbuf, buf_bytes) == 0) {
+        return; /* nothing changed — don't touch the framebuffer */
+    }
+    /* Save current frame for next comparison */
+    if (ctx->prevbuf)
+        memcpy(ctx->prevbuf, ctx->backbuf, buf_bytes);
+
+    /* Try vsync if available (silently ignored if unsupported) */
+    {
+        int zero = 0;
+        ioctl(ctx->fb_fd, FBIO_WAITFORVSYNC, &zero);
+    }
     if (!ctx->rotated) {
         /* No rotation — straight copy */
         if (ctx->stride == ctx->width * 2) {
@@ -365,21 +396,42 @@ void gfx_flip(GfxContext *ctx) {
          *   fb_x = (fb_width - 1) - gy   = 221 - gy
          *   fb_y = gx
          *
-         * We iterate over FB rows for sequential writes to mmap'd memory.
+         * Strategy: rotate into a temp buffer with sequential writes,
+         * then blast to the FB in one memcpy to minimize tearing.
          */
-        int fb_stride_px = ctx->stride / 2;
+        int fb_w = ctx->fb_width;   /* 222 */
+        int fb_h = ctx->fb_height;  /* 480 */
         int game_w = ctx->width;    /* 480 */
         int game_h = ctx->height;   /* 222 */
+        size_t fb_pixels = (size_t)fb_w * fb_h;
 
-        for (int fb_y = 0; fb_y < ctx->fb_height; fb_y++) {
-            uint16_t *fb_row = ctx->fb_ptr + fb_y * fb_stride_px;
-            int gx = fb_y;  /* game x = fb row */
-            for (int fb_x = 0; fb_x < ctx->fb_width; fb_x++) {
-                int gy = (ctx->fb_width - 1) - fb_x;  /* game y = mirrored fb col */
-                if (gx < game_w && gy < game_h)
-                    fb_row[fb_x] = ctx->backbuf[gy * game_w + gx];
-                else
-                    fb_row[fb_x] = 0;
+        /* Use a static temp buffer to avoid malloc/free every frame */
+        static uint16_t *rot_buf = NULL;
+        static size_t rot_buf_size = 0;
+        if (!rot_buf || rot_buf_size != fb_pixels) {
+            free(rot_buf);
+            rot_buf = (uint16_t *)malloc(fb_pixels * sizeof(uint16_t));
+            rot_buf_size = fb_pixels;
+        }
+
+        /* Build rotated image — iterate game rows for sequential backbuf reads */
+        for (int gy = 0; gy < game_h; gy++) {
+            const uint16_t *src_row = ctx->backbuf + gy * game_w;
+            int fb_x = (fb_w - 1) - gy;
+            for (int gx = 0; gx < game_w; gx++) {
+                rot_buf[gx * fb_w + fb_x] = src_row[gx];
+            }
+        }
+
+        /* Single blast to framebuffer — minimizes tearing */
+        if (ctx->stride == fb_w * 2) {
+            memcpy(ctx->fb_ptr, rot_buf, fb_pixels * sizeof(uint16_t));
+        } else {
+            int fb_stride_px = ctx->stride / 2;
+            for (int y = 0; y < fb_h; y++) {
+                memcpy(ctx->fb_ptr + y * fb_stride_px,
+                       rot_buf + y * fb_w,
+                       fb_w * sizeof(uint16_t));
             }
         }
     }
