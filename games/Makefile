@@ -26,7 +26,10 @@ endif
 # ── Pager Connection ───────────────────────────────────────────────
 PAGER_HOST ?= root@172.16.52.1
 PAGER_DIR  ?= /root/games
-SSH_OPTS ?= $(SSH_KEY) -o StrictHostKeyChecking=no
+
+# SSH multiplexing — enter password ONCE, reuse for all commands
+SSH_SOCK  ?= /tmp/pager-ssh-sock
+SSH_OPTS  ?= -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=$(SSH_SOCK) -o ControlPersist=300
 
 # ── Payload Integration ───────────────────────────────────────────
 # This is where the Pager UI looks for user payloads.
@@ -38,11 +41,12 @@ PAYLOAD_DIR ?= /mmc/root/payloads/user/games
 GAMES = \
 	snake/snake \
 	pong/pong \
-	packet_catcher/packet_catcher
+	packet_catcher/packet_catcher \
+	netrunner/netrunner
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean deploy deploy-payloads find-payload-dir run-snake run-pong run-packet-catcher help
+.PHONY: all clean deploy deploy-payloads find-payload-dir run-snake run-pong run-packet-catcher run-netrunner ssh-open ssh-close help
 
 all: $(GAMES)
 	@echo ""
@@ -64,25 +68,50 @@ packet_catcher/packet_catcher: packet_catcher/packet_catcher.c engine/pager_engi
 	$(STRIP) $@
 	@echo "[OK] packet_catcher"
 
+netrunner/netrunner: netrunner/netrunner.c netrunner/game_data.h engine/pager_engine.h engine/pager_gfx.h engine/pager_input.h engine/pager_hw.h
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	$(STRIP) $@
+	@echo "[OK] netrunner"
+
+# ── SSH Connection (enter password once) ───────────────────────────
+
+ssh-open:
+	@if [ ! -S $(SSH_SOCK) ]; then \
+		echo "=== Opening SSH connection (enter password once) ==="; \
+		ssh -o StrictHostKeyChecking=no -o ControlMaster=yes -o ControlPath=$(SSH_SOCK) -o ControlPersist=300 -fN $(PAGER_HOST); \
+	else \
+		echo "=== SSH connection already open ==="; \
+	fi
+
+ssh-close:
+	@if [ -S $(SSH_SOCK) ]; then \
+		ssh -o ControlPath=$(SSH_SOCK) -O exit $(PAGER_HOST) 2>/dev/null; \
+		echo "=== SSH connection closed ==="; \
+	else \
+		echo "=== No active SSH connection ==="; \
+	fi
+
 # ── Deploy to Pager ────────────────────────────────────────────────
 
-deploy: all
+deploy: all ssh-open
 	@echo "=== Deploying to $(PAGER_HOST):$(PAGER_DIR) ==="
-	ssh $(SSH_OPTS) $(PAGER_HOST) "mkdir -p $(PAGER_DIR)/snake $(PAGER_DIR)/pong $(PAGER_DIR)/packet_catcher"
+	ssh $(SSH_OPTS) $(PAGER_HOST) "mkdir -p $(PAGER_DIR)/snake $(PAGER_DIR)/pong $(PAGER_DIR)/packet_catcher $(PAGER_DIR)/netrunner"
 	scp $(SSH_OPTS) snake/snake                         $(PAGER_HOST):$(PAGER_DIR)/snake/
 	scp $(SSH_OPTS) pong/pong                           $(PAGER_HOST):$(PAGER_DIR)/pong/
 	scp $(SSH_OPTS) packet_catcher/packet_catcher       $(PAGER_HOST):$(PAGER_DIR)/packet_catcher/
+	scp $(SSH_OPTS) netrunner/netrunner                 $(PAGER_HOST):$(PAGER_DIR)/netrunner/
 	@echo "=== Deployed! Launch games from Payloads > games in the Pager UI ==="
 
 # ── Deploy Payloads (appear in Pager UI) ───────────────────────────
 
 deploy-payloads: deploy
 	@echo "=== Installing payloads to $(PAGER_HOST):$(PAYLOAD_DIR) ==="
-	ssh $(SSH_OPTS) $(PAGER_HOST) "mkdir -p $(PAYLOAD_DIR)/snake $(PAYLOAD_DIR)/pong $(PAYLOAD_DIR)/packet_catcher"
+	ssh $(SSH_OPTS) $(PAGER_HOST) "mkdir -p $(PAYLOAD_DIR)/snake $(PAYLOAD_DIR)/pong $(PAYLOAD_DIR)/packet_catcher $(PAYLOAD_DIR)/netrunner_2084"
 	scp $(SSH_OPTS) payloads/snake/payload.sh              $(PAGER_HOST):$(PAYLOAD_DIR)/snake/
 	scp $(SSH_OPTS) payloads/pong/payload.sh               $(PAGER_HOST):$(PAYLOAD_DIR)/pong/
 	scp $(SSH_OPTS) payloads/packet_catcher/payload.sh     $(PAGER_HOST):$(PAYLOAD_DIR)/packet_catcher/
-	ssh $(SSH_OPTS) $(PAGER_HOST) "chmod +x $(PAYLOAD_DIR)/*/payload.sh"
+	scp $(SSH_OPTS) payloads/netrunner_2084/payload.sh     $(PAGER_HOST):$(PAYLOAD_DIR)/netrunner_2084/
+	ssh $(SSH_OPTS) $(PAGER_HOST) "chmod 755 $(PAYLOAD_DIR)/*/payload.sh"
 	@echo "=== Payloads installed! They should now appear in the Pager UI under Payloads > games ==="
 
 # ── Find Payload Directory (run this first if unsure of path) ──────
@@ -101,6 +130,9 @@ run-pong: deploy
 
 run-packet-catcher: deploy
 	ssh -t $(SSH_OPTS) $(PAGER_HOST) "$(PAGER_DIR)/packet_catcher/packet_catcher"
+
+run-netrunner: deploy
+	ssh -t $(SSH_OPTS) $(PAGER_HOST) "$(PAGER_DIR)/netrunner/netrunner"
 
 # ── Clean ──────────────────────────────────────────────────────────
 
@@ -121,6 +153,7 @@ help:
 	@echo "  run-snake          Deploy + run Snake directly via SSH"
 	@echo "  run-pong           Deploy + run Pong directly via SSH"
 	@echo "  run-packet-catcher Deploy + run Packet Catcher directly via SSH"
+	@echo "  run-netrunner      Deploy + run NETRUNNER 2084 RPG via SSH"
 	@echo "  clean              Remove built binaries"
 	@echo ""
 	@echo "Variables:"
