@@ -46,6 +46,9 @@ Similar to before, just navigate to general > test_hw to see it in action!
 Games listed in payload > games menu:
 ![Description of image](images/gamesMenu.png)
 
+Image of netrunner 2084 game:
+![Description of image](images/netrunner_2084.png)
+
 Image of packet capture game:
 ![Description of image](images/packet_capture.png)
 
