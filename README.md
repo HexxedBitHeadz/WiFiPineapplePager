@@ -4,7 +4,9 @@ Well it happened again, a neat new little gadget released and has stolen our att
 
 The Hak5 WiFi Pineapple Pager released, and we cant stop poking at it. We've start learning about the device as quick as possible, begin working on some test tools and simple games to test it's capabilities.
 
-So few, we have a few basic games built as early proof of concepts, we've learned how to accessible from the payloads screen so they can be launched and played directly on the pager.
+So we have a few basic games built as early proof of concepts, we've learned how to accessible from the payloads screen so they can be launched and played directly on the pager.
+
+This repo is totally experimental, and are used as early testing for us to learn more about the WiFi Pineapple Pager
 
 The source code is all here, to compile games, below are steps we took to compile and send to the pager while connected via USB
 
