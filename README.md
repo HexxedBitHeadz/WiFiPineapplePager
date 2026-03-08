@@ -26,10 +26,9 @@ make clean && make CROSS_COMPILE=mipsel-linux-muslsf-
 make deploy CROSS_COMPILE=mipsel-linux-muslsf-
 ```
 
-It'll ask you for your Pager password a few times, we found that setting up a ssh key works wonders here if doing this alot!
+It'll ask you for your Pager password, once entered, it will transfer the games over.
 
 At this point as long as the device is plugged in and accessible via ssh root@172.16.52.1, the games should be seen in payloads > games from the main screen. 
-
 
 There is also a test/test_hw.c tool that was used to assist getting the buttons figured out. We are including that tool here as well, in case a button test is needed.
 
