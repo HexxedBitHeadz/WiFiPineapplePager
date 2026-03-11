@@ -1,5 +1,7 @@
 ## Hexxed BitHeadz WiFi Pineapple Pager repo
 
+[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://paypal.me/DevinCleary)
+
 Well it happened again, a neat new little gadget released and has stolen our attention from our everyday lives XD
 
 The Hak5 WiFi Pineapple Pager released, and we cant stop poking at it. We've start learning about the device as quick as possible, begin working on some test tools and simple games to test it's capabilities.
