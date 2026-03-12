@@ -20,7 +20,7 @@
 #define HUD_HEIGHT       22     /* top bar */
 #define MSG_HEIGHT       44     /* bottom message area (2 lines + border) */
 
-#define MAX_INVENTORY    16
+#define MAX_INVENTORY    64
 #define MAX_ABILITIES    8
 #define MAX_ENEMIES_MAP  6
 #define MAX_NPCS_MAP     4
@@ -600,7 +600,7 @@ static void player_level_up(Player *p) {
 
 static void player_init(Player *p) {
     memset(p, 0, sizeof(Player));
-    strncpy(p->name, "Runner", MAX_NAME);
+    snprintf(p->name, MAX_NAME, "Runner");
     p->level = 1;
     p->exp = 0;
     p->exp_next = 75;

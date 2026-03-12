@@ -363,14 +363,31 @@ void gfx_cleanup(GfxContext *ctx) {
 }
 
 void gfx_flip(GfxContext *ctx) {
-    /* Dirty-check: compare backbuf to previous frame, skip if identical */
-    size_t buf_bytes = (size_t)ctx->width * ctx->height * sizeof(uint16_t);
-    if (ctx->prevbuf && memcmp(ctx->backbuf, ctx->prevbuf, buf_bytes) == 0) {
-        return; /* nothing changed — don't touch the framebuffer */
+    /*
+     * Dirty-line partial update: instead of blitting the entire framebuffer,
+     * only copy scanlines that actually changed. This reduces the write
+     * window and minimizes tearing on SPI displays without lowering FPS.
+     */
+    int w = ctx->width;
+    int h = ctx->height;
+    size_t row_bytes = (size_t)w * sizeof(uint16_t);
+
+    /* Find dirty line range */
+    int dirty_top = -1, dirty_bot = -1;
+    for (int y = 0; y < h; y++) {
+        if (memcmp(ctx->backbuf + y * w, ctx->prevbuf + y * w, row_bytes) != 0) {
+            if (dirty_top < 0) dirty_top = y;
+            dirty_bot = y;
+        }
     }
+
+    /* Nothing changed — skip entirely */
+    if (dirty_top < 0) return;
+
     /* Save current frame for next comparison */
-    if (ctx->prevbuf)
-        memcpy(ctx->prevbuf, ctx->backbuf, buf_bytes);
+    memcpy(ctx->prevbuf + dirty_top * w,
+           ctx->backbuf + dirty_top * w,
+           (size_t)(dirty_bot - dirty_top + 1) * row_bytes);
 
     /* Try vsync if available (silently ignored if unsupported) */
     {
@@ -378,14 +395,16 @@ void gfx_flip(GfxContext *ctx) {
         ioctl(ctx->fb_fd, FBIO_WAITFORVSYNC, &zero);
     }
     if (!ctx->rotated) {
-        /* No rotation — straight copy */
-        if (ctx->stride == ctx->width * 2) {
-            memcpy(ctx->fb_ptr, ctx->backbuf, ctx->width * ctx->height * sizeof(uint16_t));
+        /* No rotation — copy only dirty lines */
+        if (ctx->stride == w * 2) {
+            memcpy((uint8_t *)ctx->fb_ptr + dirty_top * row_bytes,
+                   ctx->backbuf + dirty_top * w,
+                   (size_t)(dirty_bot - dirty_top + 1) * row_bytes);
         } else {
-            for (int y = 0; y < ctx->height; y++) {
+            for (int y = dirty_top; y <= dirty_bot; y++) {
                 memcpy((uint8_t *)ctx->fb_ptr + y * ctx->stride,
-                       ctx->backbuf + y * ctx->width,
-                       ctx->width * sizeof(uint16_t));
+                       ctx->backbuf + y * w,
+                       row_bytes);
             }
         }
     } else {
@@ -396,8 +415,10 @@ void gfx_flip(GfxContext *ctx) {
          *   fb_x = (fb_width - 1) - gy   = 221 - gy
          *   fb_y = gx
          *
-         * Strategy: rotate into a temp buffer with sequential writes,
-         * then blast to the FB in one memcpy to minimize tearing.
+         * Only rebuild the rotated columns corresponding to dirty game rows.
+         * Since a dirty game row y maps to FB column x = (fb_w-1-y), we
+         * still need to write full FB rows that touch those columns.
+         * But we can limit the rotation work to only dirty source rows.
          */
         int fb_w = ctx->fb_width;   /* 222 */
         int fb_h = ctx->fb_height;  /* 480 */
@@ -414,8 +435,8 @@ void gfx_flip(GfxContext *ctx) {
             rot_buf_size = fb_pixels;
         }
 
-        /* Build rotated image — iterate game rows for sequential backbuf reads */
-        for (int gy = 0; gy < game_h; gy++) {
+        /* Build rotated image — only process dirty game rows */
+        for (int gy = dirty_top; gy <= dirty_bot; gy++) {
             const uint16_t *src_row = ctx->backbuf + gy * game_w;
             int fb_x = (fb_w - 1) - gy;
             for (int gx = 0; gx < game_w; gx++) {
@@ -423,7 +444,17 @@ void gfx_flip(GfxContext *ctx) {
             }
         }
 
-        /* Single blast to framebuffer — minimizes tearing */
+        /*
+         * Dirty game rows [dirty_top..dirty_bot] map to FB columns
+         * [(fb_w-1-dirty_bot)..(fb_w-1-dirty_top)]. Every FB row
+         * that spans those columns needs updating, which is all rows
+         * (0..fb_h-1) since FB rows span the full width. But we only
+         * need to write the dirty column range within each row.
+         *
+         * For simplicity and to keep the write as sequential as
+         * possible, blast the whole rotated buffer. The rotation
+         * work itself is already reduced.
+         */
         if (ctx->stride == fb_w * 2) {
             memcpy(ctx->fb_ptr, rot_buf, fb_pixels * sizeof(uint16_t));
         } else {

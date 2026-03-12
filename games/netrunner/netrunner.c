@@ -80,6 +80,7 @@ typedef enum {
     STATE_TITLE,
     STATE_EXPLORE,
     STATE_COMBAT,
+    STATE_COMBAT_TRANSITION,
     STATE_INVENTORY,
     STATE_DIALOGUE,
     STATE_SHOP,
@@ -128,6 +129,7 @@ typedef struct {
     /* Inventory */
     int  inv_tab;            /* 0=items 1=equip 2=stats */
     int  inv_cursor;
+    int  equip_sub;          /* -1=slot browse, 0+=sub-list cursor */
 
     /* Pause / Title */
     int  pause_cursor;
@@ -146,6 +148,10 @@ typedef struct {
     int   shake_frames;
     int   flash_color;
     int   flash_frames;
+
+    /* Combat transition */
+    float trans_timer;       /* seconds elapsed in transition */
+    int   trans_is_boss;     /* boss gets a longer/different intro */
 } Game;
 
 /* ════════════════════════════════════════════════════════════════════ */
@@ -173,13 +179,50 @@ static void sfx_heal(void);
 static void sfx_chest(void);
 static void sfx_door(void);
 static void sfx_select(void);
+static void render_combat(GfxContext *gfx, Game *g);
+static void render_explore(GfxContext *gfx, Game *g);
+
+/* Stacked inventory view: groups identical items into (item_id, count) */
+typedef struct {
+    int item_id;
+    int count;
+    int first_raw;  /* first raw inventory index (for use/equip) */
+} InvStack;
+
+static int build_inv_stacks(const Player *p, InvStack *out, int max_out) {
+    int n = 0;
+    for (int i = 0; i < p->inv_count && n < max_out; i++) {
+        int found = 0;
+        for (int j = 0; j < n; j++) {
+            if (out[j].item_id == p->inventory[i]) {
+                out[j].count++;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            out[n].item_id = p->inventory[i];
+            out[n].count = 1;
+            out[n].first_raw = i;
+            n++;
+        }
+    }
+    return n;
+}
+
+static int find_raw_index(const Player *p, int item_id) {
+    for (int i = 0; i < p->inv_count; i++) {
+        if (p->inventory[i] == item_id) return i;
+    }
+    return 0;
+}
 
 /* ════════════════════════════════════════════════════════════════════ */
 /*                     SAVE SYSTEM                                     */
 /* ════════════════════════════════════════════════════════════════════ */
 
 #define SAVE_MAGIC   0x4E455452  /* "NETR" */
-#define SAVE_VERSION 1
+#define SAVE_VERSION 2
 #define SAVE_PATH    "/root/games/netrunner/save.dat"
 
 typedef struct {
@@ -235,6 +278,7 @@ static int load_game(Game *g) {
     memcpy(g->terminals_used, sd.terminals_used, sizeof(g->terminals_used));
     memcpy(g->npc_gifted, sd.npc_gifted, sizeof(g->npc_gifted));
     g->step_count = sd.step_count;
+    g->equip_sub = -1;
 
     /* Restore enemy alive/dead states */
     for (int m = 0; m < MAX_MAPS; m++)
@@ -296,7 +340,22 @@ static int player_has_key(const Player *p, int item_id) {
 
 static void player_add_item(Game *g, int item_id) {
     Player *p = &g->player;
-    if (item_id < 0 || p->inv_count >= MAX_INVENTORY) return;
+    if (item_id < 0) return;
+    /* Key items always fit — drop oldest non-key item if full */
+    if (p->inv_count >= MAX_INVENTORY) {
+        if (ALL_ITEMS[item_id].type == ITEM_KEY) {
+            /* Make room by removing the first non-key item */
+            for (int i = 0; i < p->inv_count; i++) {
+                if (ALL_ITEMS[p->inventory[i]].type != ITEM_KEY) {
+                    for (int j = i; j < p->inv_count - 1; j++)
+                        p->inventory[j] = p->inventory[j + 1];
+                    p->inv_count--;
+                    break;
+                }
+            }
+        }
+        if (p->inv_count >= MAX_INVENTORY) return;
+    }
     p->inventory[p->inv_count++] = item_id;
 }
 
@@ -350,7 +409,7 @@ static void sfx_hit(void)          { hw_beep(200, 60); hw_vibrate(40); }
 static void sfx_player_hit(void)   { hw_beep(150, 80); hw_vibrate(80); }
 static void sfx_heal(void)         { hw_beep(600, 50); hw_beep(900, 80); }
 static void sfx_chest(void)        { hw_beep(500, 40); hw_beep(700, 40); hw_beep(1000, 60); }
-static void sfx_door(void)         { hw_beep(300, 100); }
+static void __attribute__((unused)) sfx_door(void) { hw_beep(300, 100); }
 static void sfx_combat_start(void) { hw_beep(300, 80); hw_beep(200, 80); hw_beep(400, 120); }
 static void sfx_boss(void)         { hw_beep(100, 200); hw_beep(80, 200); hw_beep(60, 300); }
 static void sfx_death(void)        { hw_death_feedback(); }
@@ -397,6 +456,9 @@ static void update_hw_leds(const Game *g) {
         case STATE_TITLE:
             /* Pulsing handled in render */
             break;
+        case STATE_COMBAT_TRANSITION:
+            /* LEDs set when transition ends */
+            break;
         case STATE_GAME_OVER:
             hw_led_dpad_all(LED_RED);
             hw_led_a_button(0);
@@ -439,7 +501,7 @@ static void start_combat(Game *g, int tmpl_idx) {
     const EnemyTemplate *t = &ENEMY_TEMPLATES[tmpl_idx];
     CombatEnemy *e = &g->enemy;
 
-    strncpy(e->name, t->name, MAX_NAME);
+    snprintf(e->name, MAX_NAME, "%s", t->name);
     e->hp = t->max_hp;
     e->max_hp = t->max_hp;
     e->atk = t->atk;
@@ -456,7 +518,9 @@ static void start_combat(Game *g, int tmpl_idx) {
     e->dot_turns = 0;
     e->is_boss = (tmpl_idx == ENEMY_BOSS_KIRA || tmpl_idx == ENEMY_BOSS_ARIA);
 
-    g->state = STATE_COMBAT;
+    g->state = STATE_COMBAT_TRANSITION;
+    g->trans_timer = 0.0f;
+    g->trans_is_boss = e->is_boss;
     g->combat_phase = COMBAT_MENU;
     g->combat_cursor = 0;
     g->combat_sub = 0;
@@ -761,12 +825,17 @@ static void render_hud(GfxContext *gfx, const Game *g) {
     gfx_text(gfx, 44, 12, "EXP", CYB_DIM_GREEN);
     draw_bar(gfx, 70, 12, 80, 6, p->exp, p->exp_next, CYB_GREEN, CYB_DARK_BG);
 
-    /* Right: Credits + Map name — scale 2 */
-    gfx_printf_scaled(gfx, 206, 4, CYB_YELLOW, 2, "$%d", p->credits);
-
+    /* Right: Map name (right-aligned) + Credits (left of map name) — scale 2 */
     const char *map_name = MAPS[p->current_map].name;
     int name_len = strlen(map_name);
-    gfx_text_scaled(gfx, SCREEN_W - name_len * 16 - 4, 4, map_name, CYB_CYAN, 2);
+    int map_x = SCREEN_W - name_len * 16 - 4;
+    gfx_text_scaled(gfx, map_x, 4, map_name, CYB_CYAN, 2);
+
+    char cred_buf[16];
+    snprintf(cred_buf, sizeof(cred_buf), "$%d", p->credits);
+    int cred_len = strlen(cred_buf);
+    int cred_x = map_x - cred_len * 16 - 8;
+    gfx_text_scaled(gfx, cred_x, 4, cred_buf, CYB_YELLOW, 2);
 }
 
 /* ════════════════════════════════════════════════════════════════════ */
@@ -905,6 +974,118 @@ static void draw_enemy_art(GfxContext *gfx, const CombatEnemy *e, int frame) {
         gfx_rect_fill(gfx, cx + 1, cy - 6, 5, 3, CYB_RED);
         gfx_char(gfx, cx - 4, cy + 2,
                  e->name[0], c);
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════ */
+/*                  COMBAT TRANSITION EFFECT                           */
+/* ════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Cyberpunk "glitch scan" transition:
+ *   Phase 1 (0.0–0.4s): Explore screen with glitch bars sweeping down
+ *   Phase 2 (0.4–0.7s): Screen fills with neon scan lines, enemy name flash
+ *   Phase 3 (0.7–1.0s): Quick flash then fade into battle screen
+ *   Boss variant adds extra time + red tint.
+ */
+#define TRANS_DURATION      1.0f
+#define TRANS_BOSS_DURATION 1.4f
+
+static void render_combat_transition(GfxContext *gfx, Game *g) {
+    float dur = g->trans_is_boss ? TRANS_BOSS_DURATION : TRANS_DURATION;
+    float t = g->trans_timer / dur;  /* 0..1 normalized progress */
+    if (t > 1.0f) t = 1.0f;
+
+    int frame = (int)(g->anim_t * 30);
+    uint16_t accent = g->trans_is_boss ? CYB_RED : CYB_GREEN;
+    uint16_t accent2 = g->trans_is_boss ? CYB_ORANGE : CYB_CYAN;
+
+    if (t < 0.45f) {
+        /* Phase 1: Explore screen + glitch bars sweep down */
+        gfx_clear(gfx, CYB_BG);
+        render_explore(gfx, g);
+
+        /* Horizontal glitch bars — sweep downward */
+        float sweep = t / 0.45f;  /* 0..1 within phase */
+        int num_bars = 6 + (int)(sweep * 6);
+        for (int i = 0; i < num_bars; i++) {
+            /* Pseudo-random bar positions using frame + i */
+            int seed = (frame * 7 + i * 131) & 0xFFFF;
+            int bar_y = (int)(sweep * SCREEN_H) + (seed % 40) - 20;
+            int bar_h = 2 + (seed >> 4) % 6;
+            uint16_t bar_col = (i & 1) ? accent : accent2;
+            if (bar_y >= 0 && bar_y < SCREEN_H)
+                gfx_rect_fill(gfx, 0, bar_y, SCREEN_W, bar_h, bar_col);
+        }
+
+        /* Occasional horizontal offset glitch slices */
+        if (frame % 3 == 0) {
+            int slice_y = (frame * 37) % SCREEN_H;
+            int slice_h = 4 + (frame * 13) % 12;
+            int offset = ((frame * 7) % 20) - 10;
+            /* Draw a shifted copy of one slice (simulated by colored bar) */
+            gfx_rect_fill(gfx, offset < 0 ? 0 : SCREEN_W - offset,
+                          slice_y, (offset < 0 ? -offset : offset),
+                          slice_h, CYB_DARK_BG);
+        }
+
+    } else if (t < 0.75f) {
+        /* Phase 2: Scan-line fill + enemy name reveal */
+        gfx_clear(gfx, CYB_DARK_BG);
+
+        float phase2 = (t - 0.45f) / 0.30f;  /* 0..1 within phase */
+
+        /* Neon scan lines fill screen from top */
+        int fill_y = (int)(phase2 * SCREEN_H);
+        for (int y = 0; y < fill_y; y += 3) {
+            uint16_t lc = (y & 2) ? accent : RGB565(0x00, 0x11, 0x00);
+            gfx_hline(gfx, 0, y, SCREEN_W, lc);
+        }
+
+        /* Diagonal slashes — cyberpunk aesthetic */
+        for (int i = 0; i < 8; i++) {
+            int x0 = (frame * 5 + i * 60) % (SCREEN_W + 100) - 50;
+            gfx_line(gfx, x0, 0, x0 - 40, SCREEN_H, accent2);
+        }
+
+        /* Enemy name centered, pulsing */
+        if (phase2 > 0.3f) {
+            int pulse = (frame & 2) ? 1 : 0;
+            gfx_text_centered_scaled(gfx, SCREEN_H / 2 - 16 + pulse,
+                                     "!! INTRUSION DETECTED !!",
+                                     accent, 2);
+            gfx_text_centered_scaled(gfx, SCREEN_H / 2 + 8,
+                                     g->enemy.name, g->enemy.color, 2);
+            if (g->trans_is_boss) {
+                gfx_text_centered_scaled(gfx, SCREEN_H / 2 + 32,
+                                         "< BOSS >", CYB_RED, 2);
+            }
+        }
+
+        /* Border flash */
+        gfx_rect(gfx, 0, 0, SCREEN_W, SCREEN_H, accent);
+        gfx_rect(gfx, 1, 1, SCREEN_W - 2, SCREEN_H - 2, accent2);
+
+    } else {
+        /* Phase 3: Flash then fade into battle screen */
+        float phase3 = (t - 0.75f) / 0.25f;  /* 0..1 within phase */
+
+        if (phase3 < 0.3f) {
+            /* Bright flash */
+            gfx_clear(gfx, accent);
+        } else {
+            /* Render combat screen (fading in) */
+            render_combat(gfx, g);
+
+            /* Overlay fading scanlines */
+            int fade = (int)((1.0f - phase3) * 8);
+            if (fade > 0) {
+                for (int y = 0; y < SCREEN_H; y += 2) {
+                    if ((y / 2) % fade == 0)
+                        gfx_hline(gfx, 0, y, SCREEN_W, accent);
+                }
+            }
+        }
     }
 }
 
@@ -1057,25 +1238,37 @@ static void render_combat(GfxContext *gfx, Game *g) {
         gfx_hline(ctx, 0, 122, SCREEN_W, CYB_DIM_BLUE);
         gfx_text_scaled(ctx, 4, sm_y, "Items [B=Back]:", CYB_CYAN, 2);
         sm_y += 18;
-        /* Build filtered consumable list first */
-        int ci_indices[MAX_INVENTORY];
-        int ci_count = 0;
+        /* Build stacked consumable list */
+        InvStack cstacks[MAX_INVENTORY];
+        int cs_count = 0;
         for (int i = 0; i < p->inv_count; i++) {
-            if (ALL_ITEMS[p->inventory[i]].type == ITEM_CONSUMABLE)
-                ci_indices[ci_count++] = i;
+            if (ALL_ITEMS[p->inventory[i]].type != ITEM_CONSUMABLE) continue;
+            int found = 0;
+            for (int j = 0; j < cs_count; j++) {
+                if (cstacks[j].item_id == p->inventory[i]) {
+                    cstacks[j].count++;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                cstacks[cs_count].item_id = p->inventory[i];
+                cstacks[cs_count].count = 1;
+                cstacks[cs_count].first_raw = i;
+                cs_count++;
+            }
         }
         int sel_item_id = -1;
         /* Scroll window */
         int ci_scroll = 0;
         if (g->combat_sub >= 3) ci_scroll = g->combat_sub - 2;
-        if (ci_scroll > ci_count - 3) ci_scroll = ci_count - 3;
+        if (ci_scroll > cs_count - 3) ci_scroll = cs_count - 3;
         if (ci_scroll < 0) ci_scroll = 0;
         /* Up arrow indicator */
         if (ci_scroll > 0)
             gfx_text_scaled(ctx, SCREEN_W / 2 - 4, sm_y - 2, "^", CYB_DIM_GREEN, 1);
         int ci_vis = 0;
-        for (int i = ci_scroll; i < ci_count && ci_vis < 3; i++, ci_vis++) {
-            int inv_idx = ci_indices[i];
+        for (int i = ci_scroll; i < cs_count && ci_vis < 3; i++, ci_vis++) {
             int ox = 8;
             int oy = sm_y + ci_vis * 18;
             int is_sel = (i == g->combat_sub);
@@ -1083,14 +1276,18 @@ static void render_combat(GfxContext *gfx, Game *g) {
             if (is_sel) {
                 gfx_rect_fill(ctx, ox - 2, oy - 1, SCREEN_W - 12, 17, CYB_SEL_BG);
                 gfx_text_scaled(ctx, ox, oy, ">", col, 2);
-                sel_item_id = p->inventory[inv_idx];
+                sel_item_id = cstacks[i].item_id;
             }
-            gfx_text_scaled(ctx, ox + 18, oy, ALL_ITEMS[p->inventory[inv_idx]].name, col, 2);
+            const char *iname = ALL_ITEMS[cstacks[i].item_id].name;
+            if (cstacks[i].count > 1)
+                gfx_printf_scaled(ctx, ox + 18, oy, col, 2, "%s (%d)", iname, cstacks[i].count);
+            else
+                gfx_text_scaled(ctx, ox + 18, oy, iname, col, 2);
         }
         /* Down arrow indicator */
-        if (ci_scroll + 3 < ci_count)
+        if (ci_scroll + 3 < cs_count)
             gfx_text_scaled(ctx, SCREEN_W / 2 - 4, sm_y + 3 * 18, "v", CYB_DIM_GREEN, 1);
-        if (ci_count == 0)
+        if (cs_count == 0)
             gfx_text_scaled(ctx, 16, sm_y, "No usable items!", CYB_DIM_GREEN, 2);
         /* Show selected item description */
         if (sel_item_id >= 0) {
@@ -1154,42 +1351,51 @@ static void render_inventory(GfxContext *gfx, const Game *g) {
     int y = 26;
 
     if (g->inv_tab == 0) {
-        /* ITEMS tab */
+        /* ITEMS tab — stacked display */
         gfx_text_scaled(gfx, 4, y, "Consumables & Key Items:", CYB_CYAN, 2);
         y += 22;
-        if (p->inv_count == 0) {
+
+        InvStack stacks[MAX_INVENTORY];
+        int stack_count = build_inv_stacks(p, stacks, MAX_INVENTORY);
+
+        if (stack_count == 0) {
             gfx_text_scaled(gfx, 16, y, "Empty", CYB_DIM_GREEN, 2);
         } else {
-            int vis = 8;
-            int scroll = 0;
-            if (p->inv_count > vis && g->inv_cursor >= vis) {
-                scroll = g->inv_cursor - vis + 1;
-                if (scroll > p->inv_count - vis) scroll = p->inv_count - vis;
-            }
+            int vis = 7;
+            int cursor = g->inv_cursor;
+            if (cursor >= stack_count) cursor = stack_count - 1;
+
+            int scroll = cursor - vis + 1;
+            if (scroll < 0) scroll = 0;
+            if (scroll > stack_count - vis) scroll = stack_count - vis;
+            if (scroll < 0) scroll = 0;
             if (scroll > 0)
                 gfx_text_scaled(gfx, SCREEN_W - 24, y - 2, "^", CYB_DIM_GREEN, 2);
-            for (int i = 0; i < vis && (i + scroll) < p->inv_count; i++) {
+            for (int i = 0; i < vis && (i + scroll) < stack_count; i++) {
                 int idx = i + scroll;
-                int is_sel = (idx == g->inv_cursor);
+                int is_sel = (idx == cursor);
                 if (is_sel) {
                     gfx_rect_fill(gfx, 2, y - 1, SCREEN_W - 4, 18, CYB_SEL_BG);
                     gfx_text_scaled(gfx, 4, y, ">", CYB_GREEN, 2);
                 }
-                const Item *item = &ALL_ITEMS[p->inventory[idx]];
+                const Item *item = &ALL_ITEMS[stacks[idx].item_id];
                 uint16_t col = is_sel ? CYB_GREEN : CYB_DIM_GREEN;
-                gfx_printf_scaled(gfx, 22, y, col, 2, "%s", item->name);
+                if (stacks[idx].count > 1)
+                    gfx_printf_scaled(gfx, 22, y, col, 2, "%s (%d)", item->name, stacks[idx].count);
+                else
+                    gfx_printf_scaled(gfx, 22, y, col, 2, "%s", item->name);
                 if (item->type == ITEM_KEY)
                     gfx_text_scaled(gfx, 300, y, "[KEY]", CYB_YELLOW, 2);
                 y += 19;
             }
-            if (scroll + vis < p->inv_count)
+            if (scroll + vis < stack_count)
                 gfx_text_scaled(gfx, SCREEN_W - 24, y - 2, "v", CYB_DIM_GREEN, 2);
         }
         /* Description of selected item */
-        if (p->inv_count > 0 && g->inv_cursor < p->inv_count) {
+        if (stack_count > 0 && g->inv_cursor < stack_count) {
             gfx_rect_fill(gfx, 0, 182, SCREEN_W, 40, CYB_MSG_BG);
             gfx_hline(gfx, 0, 182, SCREEN_W, CYB_DIM_BLUE);
-            const Item *sel = &ALL_ITEMS[p->inventory[g->inv_cursor]];
+            const Item *sel = &ALL_ITEMS[stacks[g->inv_cursor].item_id];
             int desc_sc = ((int)strlen(sel->desc) <= 29) ? 2 : 1;
             int desc_y = (desc_sc == 2) ? 184 : 188;
             gfx_text_scaled(gfx, 4, desc_y, sel->desc, CYB_CYAN, desc_sc);
@@ -1199,38 +1405,109 @@ static void render_inventory(GfxContext *gfx, const Game *g) {
                 gfx_text_scaled(gfx, 4, 204, "[A] Equip", CYB_GREEN, 2);
         }
     } else if (g->inv_tab == 1) {
-        /* EQUIP tab */
-        gfx_text_scaled(gfx, 4, y, "Equipment:", CYB_CYAN, 2); y += 22;
+        /* EQUIP tab — interactive */
+        if (g->equip_sub < 0) {
+            /* Slot browse mode — label row then item row */
 
-        gfx_text_scaled(gfx, 4, y, "DECK:", CYB_ORANGE, 2);
-        if (p->weapon >= 0)
-            gfx_printf_scaled(gfx, 92, y, CYB_GREEN, 2, "%s (ATK +%d)",
-                       ALL_ITEMS[p->weapon].name, ALL_ITEMS[p->weapon].value);
-        else
-            gfx_text_scaled(gfx, 92, y, "None", CYB_DIM_GREEN, 2);
-        y += 22;
+            /* DECK slot */
+            if (g->inv_cursor == 0) gfx_text_scaled(gfx, 4, y, ">", CYB_GREEN, 2);
+            gfx_text_scaled(gfx, 20, y, "DECK:", CYB_ORANGE, 2);
+            y += 18;
+            if (p->weapon >= 0)
+                gfx_printf_scaled(gfx, 32, y, CYB_GREEN, 2, "%s  ATK +%d",
+                           ALL_ITEMS[p->weapon].name, ALL_ITEMS[p->weapon].value);
+            else
+                gfx_text_scaled(gfx, 32, y, "None", CYB_DIM_GREEN, 2);
+            y += 22;
 
-        gfx_text_scaled(gfx, 4, y, "FIREWALL:", CYB_BLUE, 2);
-        if (p->armor >= 0)
-            gfx_printf_scaled(gfx, 156, y, CYB_GREEN, 2, "%s (DEF +%d)",
-                       ALL_ITEMS[p->armor].name, ALL_ITEMS[p->armor].value);
-        else
-            gfx_text_scaled(gfx, 156, y, "None", CYB_DIM_GREEN, 2);
-        y += 22;
+            /* FIREWALL slot */
+            if (g->inv_cursor == 1) gfx_text_scaled(gfx, 4, y, ">", CYB_GREEN, 2);
+            gfx_text_scaled(gfx, 20, y, "FIREWALL:", CYB_BLUE, 2);
+            y += 18;
+            if (p->armor >= 0)
+                gfx_printf_scaled(gfx, 32, y, CYB_GREEN, 2, "%s  DEF +%d",
+                           ALL_ITEMS[p->armor].name, ALL_ITEMS[p->armor].value);
+            else
+                gfx_text_scaled(gfx, 32, y, "None", CYB_DIM_GREEN, 2);
+            y += 22;
 
-        gfx_text_scaled(gfx, 4, y, "IMPLANT:", CYB_PURPLE, 2);
-        if (p->implant >= 0)
-            gfx_printf_scaled(gfx, 140, y, CYB_GREEN, 2, "%s",
-                       ALL_ITEMS[p->implant].name);
-        else
-            gfx_text_scaled(gfx, 140, y, "None", CYB_DIM_GREEN, 2);
-        y += 28;
+            /* IMPLANT slot */
+            if (g->inv_cursor == 2) gfx_text_scaled(gfx, 4, y, ">", CYB_GREEN, 2);
+            gfx_text_scaled(gfx, 20, y, "IMPLANT:", CYB_PURPLE, 2);
+            y += 18;
+            if (p->implant >= 0)
+                gfx_printf_scaled(gfx, 32, y, CYB_GREEN, 2, "%s",
+                           ALL_ITEMS[p->implant].name);
+            else
+                gfx_text_scaled(gfx, 32, y, "None", CYB_DIM_GREEN, 2);
+            y += 24;
 
-        gfx_text_scaled(gfx, 4, y, "Total ATK:", CYB_ORANGE, 2);
-        gfx_printf_scaled(gfx, 180, y, CYB_GREEN, 2, "%d", player_total_atk(p));
-        y += 22;
-        gfx_text_scaled(gfx, 4, y, "Total DEF:", CYB_BLUE, 2);
-        gfx_printf_scaled(gfx, 180, y, CYB_GREEN, 2, "%d", player_total_def(p));
+            gfx_text_scaled(gfx, 4, y, "Total ATK:", CYB_ORANGE, 2);
+            gfx_printf_scaled(gfx, 180, y, CYB_GREEN, 2, "%d", player_total_atk(p));
+            y += 22;
+            gfx_text_scaled(gfx, 4, y, "Total DEF:", CYB_BLUE, 2);
+            gfx_printf_scaled(gfx, 180, y, CYB_GREEN, 2, "%d", player_total_def(p));
+
+            /* Hint — only if there are alternatives to browse */
+            {
+                int tt = (g->inv_cursor == 0) ? ITEM_WEAPON :
+                         (g->inv_cursor == 1) ? ITEM_ARMOR : ITEM_IMPLANT;
+                int eq = (g->inv_cursor == 0) ? p->weapon :
+                         (g->inv_cursor == 1) ? p->armor : p->implant;
+                int ac = (eq >= 0) ? 1 : 0;
+                for (int i = 0; i < p->inv_count; i++)
+                    if (ALL_ITEMS[p->inventory[i]].type == tt && p->inventory[i] != eq)
+                        ac++;
+                if (ac > 1)
+                    gfx_text_scaled(gfx, 4, 204, "[A] Browse", CYB_GREEN, 2);
+            }
+        } else {
+            /* Sub-list mode — show all alternatives for selected slot */
+            const char *slot_name = (g->inv_cursor == 0) ? "DECK" :
+                                    (g->inv_cursor == 1) ? "FIREWALL" : "IMPLANT";
+            gfx_printf_scaled(gfx, 4, y, CYB_CYAN, 2, "Select %s:", slot_name);
+            y += 22;
+
+            int target_type = (g->inv_cursor == 0) ? ITEM_WEAPON :
+                              (g->inv_cursor == 1) ? ITEM_ARMOR : ITEM_IMPLANT;
+            int equipped = (g->inv_cursor == 0) ? p->weapon :
+                           (g->inv_cursor == 1) ? p->armor : p->implant;
+            int alts[MAX_INVENTORY + 1];
+            int alt_count = 0;
+            if (equipped >= 0) alts[alt_count++] = equipped;
+            for (int i = 0; i < p->inv_count; i++)
+                if (ALL_ITEMS[p->inventory[i]].type == target_type &&
+                    p->inventory[i] != equipped)
+                    alts[alt_count++] = p->inventory[i];
+
+            int vis = 6;
+            int scroll = (g->equip_sub > vis - 1) ? g->equip_sub - vis + 1 : 0;
+            for (int i = scroll; i < alt_count && i < scroll + vis; i++) {
+                uint16_t color = (i == g->equip_sub) ? CYB_GREEN : CYB_DIM_GREEN;
+                if (i == g->equip_sub)
+                    gfx_text_scaled(gfx, 4, y, ">", CYB_GREEN, 2);
+                if (alts[i] == equipped)
+                    gfx_printf_scaled(gfx, 20, y, color, 2, "%s  [E]",
+                               ALL_ITEMS[alts[i]].name);
+                else
+                    gfx_printf_scaled(gfx, 20, y, color, 2, "%s",
+                               ALL_ITEMS[alts[i]].name);
+                /* Show stat bonus */
+                if (target_type == ITEM_WEAPON)
+                    gfx_printf_scaled(gfx, 370, y, color, 2, "ATK +%d",
+                               ALL_ITEMS[alts[i]].value);
+                else if (target_type == ITEM_ARMOR)
+                    gfx_printf_scaled(gfx, 370, y, color, 2, "DEF +%d",
+                               ALL_ITEMS[alts[i]].value);
+                y += 20;
+            }
+            if (scroll > 0)
+                gfx_text(gfx, SCREEN_W - 16, 58, "^", CYB_DIM_GREEN);
+            if (scroll + vis < alt_count)
+                gfx_text(gfx, SCREEN_W - 16, 58 + vis * 20 - 6, "v", CYB_DIM_GREEN);
+
+            gfx_text_scaled(gfx, 4, 204, "[A] Equip  [B] Back", CYB_GREEN, 2);
+        }
     } else {
         /* STATS tab — two columns */
         gfx_text_scaled(gfx, 4, y, "Character Stats:", CYB_CYAN, 2); y += 24;
@@ -1326,7 +1603,32 @@ static void render_shop(GfxContext *gfx, const Game *g) {
         int item_id = g->shop_list[i];
         const Item *item = &ALL_ITEMS[item_id];
         int is_sel = (i == g->shop_cursor);
-        int can_buy = (p->credits >= item->price && p->inv_count < MAX_INVENTORY);
+        int needs_inv = (item->type == ITEM_CONSUMABLE);
+
+        /* Check if player already owns this non-consumable */
+        int already_owned = 0;
+        if (item->type == ITEM_WEAPON) {
+            already_owned = (p->weapon == item_id);
+            for (int j = 0; !already_owned && j < p->inv_count; j++)
+                if (p->inventory[j] == item_id) already_owned = 1;
+        } else if (item->type == ITEM_ARMOR) {
+            already_owned = (p->armor == item_id);
+            for (int j = 0; !already_owned && j < p->inv_count; j++)
+                if (p->inventory[j] == item_id) already_owned = 1;
+        } else if (item->type == ITEM_IMPLANT) {
+            already_owned = (p->implant == item_id);
+        }
+
+        /* For weapon/armor: also need room to stash old equipped item */
+        int stash_full = 0;
+        if (!already_owned && p->inv_count >= MAX_INVENTORY) {
+            if ((item->type == ITEM_WEAPON && p->weapon >= 0) ||
+                (item->type == ITEM_ARMOR  && p->armor  >= 0))
+                stash_full = 1;
+        }
+        int can_buy = !already_owned && !stash_full &&
+                      p->credits >= item->price &&
+                      (!needs_inv || p->inv_count < MAX_INVENTORY);
 
         if (is_sel) {
             gfx_rect_fill(gfx, 2, y - 1, SCREEN_W - 4, 19, CYB_SEL_BG);
@@ -1336,7 +1638,12 @@ static void render_shop(GfxContext *gfx, const Game *g) {
         uint16_t name_col = can_buy ? (is_sel ? CYB_GREEN : CYB_DIM_GREEN) :
                             RGB565(0x55, 0x22, 0x22);
         gfx_printf_scaled(gfx, 22, y, name_col, 2, "%s", item->name);
-        gfx_printf_scaled(gfx, 300, y, name_col, 2, "$%d", item->price);
+        if (already_owned)
+            gfx_text_scaled(gfx, 300, y, "OWNED", CYB_DIM_GREEN, 2);
+        else if (stash_full)
+            gfx_text_scaled(gfx, 300, y, "INV FULL", CYB_RED, 2);
+        else
+            gfx_printf_scaled(gfx, 300, y, name_col, 2, "$%d", item->price);
 
         /* Show type indicator */
         const char *type_label = "";
@@ -1562,6 +1869,7 @@ static void handle_title_input(Game *g, const InputContext *inp) {
                 player_init(&g->player);
                 memset(g->terminals_used, 0, sizeof(g->terminals_used));
                 memset(g->npc_gifted, 0, sizeof(g->npc_gifted));
+                g->equip_sub = -1;
                 g->state = STATE_EXPLORE;
                 change_map(g, 0);
                 update_hw_leds(g);
@@ -1616,11 +1924,26 @@ static void handle_explore_input(Engine *engine, Game *g) {
             switch (tile) {
                 case TILE_STAIRS:
                     if (m->next_map >= 0) {
-                        /* Check for key requirements */
+                        /* Failsafe: if the boss that drops a key is dead but
+                           the key was lost (e.g. inventory was full), recover it */
                         if (m->next_map == 4 && !player_has_key(p, ITEM_SERVER_KEY)) {
-                            set_msg(g, "Door locked!", "Need: Server Room Key");
-                            p->x -= dx;
-                            p->y -= dy;
+                            /* Check if Kira (boss on MAP 3) is already dead */
+                            MapData *m3 = &MAPS[3];
+                            int kira_dead = 0;
+                            for (int i = 0; i < m3->enemy_count; i++) {
+                                if (m3->enemies[i].enemy_template == ENEMY_BOSS_KIRA &&
+                                    !m3->enemies[i].active) {
+                                    kira_dead = 1; break;
+                                }
+                            }
+                            if (kira_dead) {
+                                player_add_item(g, ITEM_SERVER_KEY);
+                                set_msg(g, "Recovered: Server Room Key", "");
+                            } else {
+                                set_msg(g, "Door locked!", "Need: Server Room Key");
+                                p->x -= dx;
+                                p->y -= dy;
+                            }
                         } else if (m->next_map == 5 && !player_has_key(p, ITEM_ROOT_CARD)) {
                             set_msg(g, "Access denied!", "Need: Root Access Card");
                             p->x -= dx;
@@ -1768,6 +2091,7 @@ static void handle_explore_input(Engine *engine, Game *g) {
         g->state = STATE_INVENTORY;
         g->inv_tab = 0;
         g->inv_cursor = 0;
+        g->equip_sub = -1;
         sfx_select();
         update_hw_leds(g);
     }
@@ -1888,29 +2212,42 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
             }
         }
     } else if (g->combat_phase == COMBAT_ITEM) {
-        /* Count usable items */
-        int usable_indices[MAX_INVENTORY];
-        int usable_count = 0;
+        /* Build stacked consumable list */
+        InvStack cstacks[MAX_INVENTORY];
+        int cs_count = 0;
         for (int i = 0; i < p->inv_count; i++) {
-            if (ALL_ITEMS[p->inventory[i]].type == ITEM_CONSUMABLE)
-                usable_indices[usable_count++] = i;
+            if (ALL_ITEMS[p->inventory[i]].type != ITEM_CONSUMABLE) continue;
+            int found = 0;
+            for (int j = 0; j < cs_count; j++) {
+                if (cstacks[j].item_id == p->inventory[i]) {
+                    cstacks[j].count++;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                cstacks[cs_count].item_id = p->inventory[i];
+                cstacks[cs_count].count = 1;
+                cstacks[cs_count].first_raw = i;
+                cs_count++;
+            }
         }
 
-        if (input_pressed(inp, BTN_UP) && usable_count > 0) {
-            g->combat_sub = (g->combat_sub + usable_count - 1) % usable_count;
+        if (input_pressed(inp, BTN_UP) && cs_count > 0) {
+            g->combat_sub = (g->combat_sub + cs_count - 1) % cs_count;
             sfx_select();
         }
-        if (input_pressed(inp, BTN_DOWN) && usable_count > 0) {
-            g->combat_sub = (g->combat_sub + 1) % usable_count;
+        if (input_pressed(inp, BTN_DOWN) && cs_count > 0) {
+            g->combat_sub = (g->combat_sub + 1) % cs_count;
             sfx_select();
         }
         if (input_pressed(inp, BTN_B)) {
             g->combat_phase = COMBAT_MENU;
         }
-        if (input_pressed(inp, BTN_A) && usable_count > 0 &&
-            g->combat_sub < usable_count) {
-            int inv_idx = usable_indices[g->combat_sub];
-            int item_id = p->inventory[inv_idx];
+        if (input_pressed(inp, BTN_A) && cs_count > 0 &&
+            g->combat_sub < cs_count) {
+            int item_id = cstacks[g->combat_sub].item_id;
+            int raw = find_raw_index(p, item_id);
             const Item *item = &ALL_ITEMS[item_id];
 
             /* Apply consumable */
@@ -1930,8 +2267,8 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
             sfx_heal();
             snprintf(g->combat_msg, MAX_MSG, "Used %s!", item->name);
 
-            /* Remove from inventory */
-            for (int j = inv_idx; j < p->inv_count - 1; j++)
+            /* Remove one instance from inventory */
+            for (int j = raw; j < p->inv_count - 1; j++)
                 p->inventory[j] = p->inventory[j + 1];
             p->inv_count--;
 
@@ -1982,33 +2319,45 @@ static void handle_combat_input(Game *g, const InputContext *inp) {
 static void handle_inventory_input(Game *g, const InputContext *inp) {
     Player *p = &g->player;
 
-    /* Tab switching */
-    if (input_pressed(inp, BTN_LEFT) && g->inv_tab > 0) {
-        g->inv_tab--;
-        g->inv_cursor = 0;
-        sfx_select();
-    }
-    if (input_pressed(inp, BTN_RIGHT) && g->inv_tab < 2) {
-        g->inv_tab++;
-        g->inv_cursor = 0;
-        sfx_select();
+    /* Tab switching (blocked while equip sub-list is open) */
+    if (g->equip_sub < 0) {
+        if (input_pressed(inp, BTN_LEFT) && g->inv_tab > 0) {
+            g->inv_tab--;
+            g->inv_cursor = 0;
+            g->equip_sub = -1;
+            sfx_select();
+        }
+        if (input_pressed(inp, BTN_RIGHT) && g->inv_tab < 2) {
+            g->inv_tab++;
+            g->inv_cursor = 0;
+            g->equip_sub = -1;
+            sfx_select();
+        }
     }
 
-    /* Item navigation */
+    /* Item navigation — cursor indexes into stacked view */
     if (g->inv_tab == 0) {
+        InvStack stacks[MAX_INVENTORY];
+        int stack_count = build_inv_stacks(p, stacks, MAX_INVENTORY);
+
         if (input_pressed(inp, BTN_UP) && g->inv_cursor > 0) {
             g->inv_cursor--;
             sfx_select();
         }
-        if (input_pressed(inp, BTN_DOWN) && g->inv_cursor < p->inv_count - 1) {
+        if (input_pressed(inp, BTN_DOWN) && g->inv_cursor < stack_count - 1) {
             g->inv_cursor++;
             sfx_select();
         }
-        /* Use items */
-        if (input_pressed(inp, BTN_A) && p->inv_count > 0 &&
-            g->inv_cursor < p->inv_count) {
-            int item_id = p->inventory[g->inv_cursor];
+        /* Clamp cursor after stack rebuild (item removal may shrink list) */
+        if (g->inv_cursor >= stack_count && stack_count > 0)
+            g->inv_cursor = stack_count - 1;
+
+        /* Use / equip items */
+        if (input_pressed(inp, BTN_A) && stack_count > 0 &&
+            g->inv_cursor < stack_count) {
+            int item_id = stacks[g->inv_cursor].item_id;
             const Item *item = &ALL_ITEMS[item_id];
+            int raw = find_raw_index(p, item_id);
 
             if (item->type == ITEM_CONSUMABLE) {
                 if (item_id == ITEM_FULL_RESTORE) {
@@ -2023,22 +2372,25 @@ static void handle_inventory_input(Game *g, const InputContext *inp) {
                     p->hp = clamp(p->hp + item->value, 0, p->max_hp);
                 }
                 sfx_heal();
-                /* Remove item */
-                for (int j = g->inv_cursor; j < p->inv_count - 1; j++)
+                /* Remove one instance from raw inventory */
+                for (int j = raw; j < p->inv_count - 1; j++)
                     p->inventory[j] = p->inventory[j + 1];
                 p->inv_count--;
-                if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
+                /* Rebuild stacks to re-check cursor bounds */
+                int new_count = build_inv_stacks(p, stacks, MAX_INVENTORY);
+                if (g->inv_cursor >= new_count && g->inv_cursor > 0)
                     g->inv_cursor--;
             } else if (item->type == ITEM_WEAPON) {
                 int old = p->weapon;
                 p->weapon = item_id;
                 if (old >= 0) {
-                    p->inventory[g->inv_cursor] = old; /* swap */
+                    p->inventory[raw] = old; /* swap */
                 } else {
-                    for (int j = g->inv_cursor; j < p->inv_count - 1; j++)
+                    for (int j = raw; j < p->inv_count - 1; j++)
                         p->inventory[j] = p->inventory[j + 1];
                     p->inv_count--;
-                    if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
+                    int new_count = build_inv_stacks(p, stacks, MAX_INVENTORY);
+                    if (g->inv_cursor >= new_count && g->inv_cursor > 0)
                         g->inv_cursor--;
                 }
                 sfx_select();
@@ -2046,12 +2398,13 @@ static void handle_inventory_input(Game *g, const InputContext *inp) {
                 int old = p->armor;
                 p->armor = item_id;
                 if (old >= 0) {
-                    p->inventory[g->inv_cursor] = old; /* swap */
+                    p->inventory[raw] = old; /* swap */
                 } else {
-                    for (int j = g->inv_cursor; j < p->inv_count - 1; j++)
+                    for (int j = raw; j < p->inv_count - 1; j++)
                         p->inventory[j] = p->inventory[j + 1];
                     p->inv_count--;
-                    if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
+                    int new_count = build_inv_stacks(p, stacks, MAX_INVENTORY);
+                    if (g->inv_cursor >= new_count && g->inv_cursor > 0)
                         g->inv_cursor--;
                 }
                 sfx_select();
@@ -2059,15 +2412,97 @@ static void handle_inventory_input(Game *g, const InputContext *inp) {
                 int old = p->implant;
                 p->implant = item_id;
                 if (old >= 0) {
-                    p->inventory[g->inv_cursor] = old; /* swap */
+                    p->inventory[raw] = old; /* swap */
                 } else {
-                    for (int j = g->inv_cursor; j < p->inv_count - 1; j++)
+                    for (int j = raw; j < p->inv_count - 1; j++)
                         p->inventory[j] = p->inventory[j + 1];
                     p->inv_count--;
-                    if (g->inv_cursor >= p->inv_count && g->inv_cursor > 0)
+                    int new_count = build_inv_stacks(p, stacks, MAX_INVENTORY);
+                    if (g->inv_cursor >= new_count && g->inv_cursor > 0)
                         g->inv_cursor--;
                 }
                 sfx_select();
+            }
+        }
+    } else if (g->inv_tab == 1) {
+        /* EQUIP tab — browse and swap equipment */
+        if (g->equip_sub < 0) {
+            /* Slot browse mode: cursor moves between DECK/FW/IMPLANT */
+            if (input_pressed(inp, BTN_UP) && g->inv_cursor > 0) {
+                g->inv_cursor--;
+                sfx_select();
+            }
+            if (input_pressed(inp, BTN_DOWN) && g->inv_cursor < 2) {
+                g->inv_cursor++;
+                sfx_select();
+            }
+            /* A opens sub-list for selected slot */
+            if (input_pressed(inp, BTN_A)) {
+                int target_type = (g->inv_cursor == 0) ? ITEM_WEAPON :
+                                  (g->inv_cursor == 1) ? ITEM_ARMOR : ITEM_IMPLANT;
+                int equipped = (g->inv_cursor == 0) ? p->weapon :
+                               (g->inv_cursor == 1) ? p->armor : p->implant;
+                int alt_count = (equipped >= 0) ? 1 : 0;
+                for (int i = 0; i < p->inv_count; i++)
+                    if (ALL_ITEMS[p->inventory[i]].type == target_type &&
+                        p->inventory[i] != equipped)
+                        alt_count++;
+                if (alt_count > 1) {
+                    g->equip_sub = 0;
+                    sfx_select();
+                }
+            }
+        } else {
+            /* Sub-list mode: navigate & select among alternatives */
+            int target_type = (g->inv_cursor == 0) ? ITEM_WEAPON :
+                              (g->inv_cursor == 1) ? ITEM_ARMOR : ITEM_IMPLANT;
+            int equipped = (g->inv_cursor == 0) ? p->weapon :
+                           (g->inv_cursor == 1) ? p->armor : p->implant;
+            int alts[MAX_INVENTORY + 1];
+            int alt_count = 0;
+            if (equipped >= 0) alts[alt_count++] = equipped;
+            for (int i = 0; i < p->inv_count; i++)
+                if (ALL_ITEMS[p->inventory[i]].type == target_type &&
+                    p->inventory[i] != equipped)
+                    alts[alt_count++] = p->inventory[i];
+
+            if (input_pressed(inp, BTN_UP) && g->equip_sub > 0) {
+                g->equip_sub--;
+                sfx_select();
+            }
+            if (input_pressed(inp, BTN_DOWN) && g->equip_sub < alt_count - 1) {
+                g->equip_sub++;
+                sfx_select();
+            }
+            /* A selects item */
+            if (input_pressed(inp, BTN_A) && g->equip_sub < alt_count) {
+                int sel_id = alts[g->equip_sub];
+                if (sel_id != equipped) {
+                    int raw = find_raw_index(p, sel_id);
+                    if (raw >= 0) {
+                        if (g->inv_cursor == 0) {
+                            if (p->weapon >= 0) p->inventory[raw] = p->weapon;
+                            else { for (int j = raw; j < p->inv_count - 1; j++) p->inventory[j] = p->inventory[j + 1]; p->inv_count--; }
+                            p->weapon = sel_id;
+                        } else if (g->inv_cursor == 1) {
+                            if (p->armor >= 0) p->inventory[raw] = p->armor;
+                            else { for (int j = raw; j < p->inv_count - 1; j++) p->inventory[j] = p->inventory[j + 1]; p->inv_count--; }
+                            p->armor = sel_id;
+                        } else {
+                            if (p->implant >= 0) p->inventory[raw] = p->implant;
+                            else { for (int j = raw; j < p->inv_count - 1; j++) p->inventory[j] = p->inventory[j + 1]; p->inv_count--; }
+                            p->implant = sel_id;
+                        }
+                        sfx_select();
+                    }
+                }
+                g->equip_sub = -1;
+            }
+            /* B closes sub-list (don't close inventory) */
+            if (input_pressed(inp, BTN_B)) {
+                g->equip_sub = -1;
+                sfx_select();
+                return;
             }
         }
     } else if (g->inv_tab == 2) {
@@ -2155,15 +2590,39 @@ static void handle_shop_input(Game *g, const InputContext *inp) {
         int item_id = g->shop_list[g->shop_cursor];
         const Item *item = &ALL_ITEMS[item_id];
 
-        /* Prevent buying duplicate implant */
-        if (item->type == ITEM_IMPLANT && p->implant == item_id) {
-            /* Already installed — do nothing */
-        } else if (p->credits >= item->price && p->inv_count < MAX_INVENTORY) {
+        /* Check if player already owns this equipment */
+        int already_own = 0;
+        if (item->type == ITEM_WEAPON) {
+            if (p->weapon == item_id) already_own = 1;
+            for (int j = 0; !already_own && j < p->inv_count; j++)
+                if (p->inventory[j] == item_id) already_own = 1;
+        } else if (item->type == ITEM_ARMOR) {
+            if (p->armor == item_id) already_own = 1;
+            for (int j = 0; !already_own && j < p->inv_count; j++)
+                if (p->inventory[j] == item_id) already_own = 1;
+        } else if (item->type == ITEM_IMPLANT) {
+            if (p->implant == item_id) already_own = 1;
+        }
+
+        if (already_own) {
+            /* Already owned — do nothing */
+        } else if (p->credits >= item->price &&
+                   (item->type != ITEM_CONSUMABLE || p->inv_count < MAX_INVENTORY)) {
+            /* For weapon/armor: need inventory space if old item must be stashed */
+            int need_stash = (item->type == ITEM_WEAPON && p->weapon >= 0) ||
+                             (item->type == ITEM_ARMOR  && p->armor  >= 0);
+            if (need_stash && p->inv_count >= MAX_INVENTORY) {
+                set_msg(g, "Inventory full!", "Clear space first.");
+            } else {
             p->credits -= item->price;
 
             if (item->type == ITEM_WEAPON) {
+                if (p->weapon >= 0)
+                    p->inventory[p->inv_count++] = p->weapon;
                 p->weapon = item_id;
             } else if (item->type == ITEM_ARMOR) {
+                if (p->armor >= 0)
+                    p->inventory[p->inv_count++] = p->armor;
                 p->armor = item_id;
             } else if (item->type == ITEM_IMPLANT) {
                 p->implant = item_id;
@@ -2175,6 +2634,7 @@ static void handle_shop_input(Game *g, const InputContext *inp) {
                 player_add_item(g, item_id);
             }
             sfx_chest();
+            }
         }
     }
     if (input_pressed(inp, BTN_B)) {
@@ -2271,6 +2731,7 @@ static void game_init(Engine *engine, void *userdata) {
     memset(g, 0, sizeof(Game));
     g->state = STATE_TITLE;
     g->title_cursor = 0;
+    g->equip_sub = -1;
     g->save_available = save_exists();
     srand(time(NULL));
 
@@ -2307,6 +2768,15 @@ static void game_update(Engine *engine, float dt, void *userdata) {
         case STATE_COMBAT:
             handle_combat_input(g, &engine->input);
             break;
+        case STATE_COMBAT_TRANSITION: {
+            float dur = g->trans_is_boss ? TRANS_BOSS_DURATION : TRANS_DURATION;
+            g->trans_timer += dt;
+            if (g->trans_timer >= dur) {
+                g->state = STATE_COMBAT;
+                update_hw_leds(g);
+            }
+            break;
+        }
         case STATE_INVENTORY:
             handle_inventory_input(g, &engine->input);
             break;
@@ -2330,6 +2800,7 @@ static void game_update(Engine *engine, float dt, void *userdata) {
                 player_init(&g->player);
                 memset(g->terminals_used, 0, sizeof(g->terminals_used));
                 memset(g->npc_gifted, 0, sizeof(g->npc_gifted));
+                g->equip_sub = -1;
                 g->state = STATE_EXPLORE;
                 change_map(g, 0);
                 update_hw_leds(g);
@@ -2342,16 +2813,19 @@ static void game_update(Engine *engine, float dt, void *userdata) {
             }
             break;
         case STATE_VICTORY:
-            if (input_pressed(&engine->input, BTN_A)) {
-                /* New game+ (keep level, reset maps) */
-                delete_save();
-                g->state = STATE_TITLE;
-                g->title_cursor = 0;
-                g->save_available = 0;
-                hw_led_all_off();
-            }
-            if (input_pressed(&engine->input, BTN_B)) {
-                engine_quit(engine);
+            /* Block input for 3 seconds so player can't accidentally skip */
+            if (g->anim_t >= 3.0f) {
+                if (input_pressed(&engine->input, BTN_A)) {
+                    /* New game+ (keep level, reset maps) */
+                    delete_save();
+                    g->state = STATE_TITLE;
+                    g->title_cursor = 0;
+                    g->save_available = 0;
+                    hw_led_all_off();
+                }
+                if (input_pressed(&engine->input, BTN_B)) {
+                    engine_quit(engine);
+                }
             }
             break;
     }
@@ -2364,6 +2838,7 @@ static void game_update(Engine *engine, float dt, void *userdata) {
         /* Award rewards before transitioning to victory screen */
         combat_victory(g);
         g->state = STATE_VICTORY;
+        g->anim_t = 0.0f;  /* Reset timer for input lockout */
         sfx_victory();
         hw_play_rtttl("Victory:d=4,o=5,b=200:c,e,g,8c6,4e6,2g6");
         hw_vibrate_pattern("200,100,200,100,500");
@@ -2385,6 +2860,9 @@ static void game_render(Engine *engine, void *userdata) {
             break;
         case STATE_COMBAT:
             render_combat(gfx, g);
+            break;
+        case STATE_COMBAT_TRANSITION:
+            render_combat_transition(gfx, g);
             break;
         case STATE_INVENTORY:
             render_inventory(gfx, g);
@@ -2433,6 +2911,7 @@ static void game_cleanup(Engine *engine, void *userdata) {
 
     /* Auto-save if player is in a gameplay state */
     if (g->state == STATE_EXPLORE || g->state == STATE_COMBAT ||
+        g->state == STATE_COMBAT_TRANSITION ||
         g->state == STATE_INVENTORY || g->state == STATE_DIALOGUE ||
         g->state == STATE_SHOP || g->state == STATE_TERMINAL ||
         g->state == STATE_PAUSE) {
@@ -2457,7 +2936,7 @@ int main(void) {
         return 1;
     }
 
-    engine.target_fps = 30;
+    engine.target_fps = 15;
     engine_run(&engine);
     engine_destroy(&engine);
 

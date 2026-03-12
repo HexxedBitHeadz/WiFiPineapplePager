@@ -1,0 +1,20 @@
+# Python virtual environment
+.venv/
+
+# Compiled game binaries (MIPS, no extension)
+games/null-buddy/null_buddy
+games/pong/pong
+games/snake/snake
+games/netrunner/netrunner
+games/packet_catcher/packet_catcher
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/

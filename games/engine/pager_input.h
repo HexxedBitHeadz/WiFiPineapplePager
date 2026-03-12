@@ -202,7 +202,7 @@ int input_init(InputContext *ctx, const char *device_path) {
     memset(ctx, 0, sizeof(InputContext));
     ctx->fd = -1;
 
-    char path[256];
+    char path[280];
     if (device_path) {
         strncpy(path, device_path, sizeof(path) - 1);
         path[sizeof(path) - 1] = '\0';
