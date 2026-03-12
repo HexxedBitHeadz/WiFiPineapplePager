@@ -44,8 +44,9 @@ make deploy CROSS_COMPILE=mipsel-linux-muslsf-
 
 Similar to before, just navigate to general > test_hw to see it in action!
 
-Games listed in payload > games menu:
-![Description of image](images/gamesMenu.png)
+Instllation and Null-Buddy demo:
+
+![Null-Buddy-install](https://github.com/user-attachments/assets/83bf6559-608a-4803-bd09-6741542ac458)
 
 Image of netrunner 2084 game:
 ![Description of image](images/netrunner_2084.png)
