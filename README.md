@@ -2,6 +2,14 @@
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://paypal.me/DevinCleary)
 
+#### UPDATE - APR 20206 >>>
+
+Merged all tools to one root folder "HeBi", makes it easier to manage compared to being under several different folders.
+
+Added file_server! Fire this up to launch a web based file server on the Pager, features allow custom port asisgnment, authentication and ability to run in background. Allows for easy uploads / easy downloads!
+
+
+
 Well it happened again, a neat new little gadget released and has stolen our attention from our everyday lives XD
 
 The Hak5 WiFi Pineapple Pager released, and we cant stop poking at it. We've start learning about the device as quick as possible, begin working on some test tools and simple games to test it's capabilities.
