@@ -13,6 +13,7 @@ import os
 import sys
 import io
 import html
+import shutil
 import base64
 import zipfile
 import urllib.parse
@@ -132,6 +133,54 @@ class FileServerHandler(SimpleHTTPRequestHandler):
             self.end_headers()
 
     # ------------------------------------------------------------------
+    # Delete — DELETE /path/to/file  or  DELETE /path/to/dir
+    # Files are unlinked; directories must be confirmed empty OR the
+    # request URL includes ?recursive to wipe non-empty trees.
+    # All targets are realpath-jailed to the serve root.
+    # ------------------------------------------------------------------
+    def do_DELETE(self):
+        if not self._check_auth():
+            return
+
+        parsed = urllib.parse.urlparse(self.path)
+        recursive = 'recursive' in urllib.parse.parse_qs(parsed.query)
+
+        target = self.translate_path(parsed.path)
+        serve_root = os.path.realpath(os.getcwd())
+        real_target = os.path.realpath(target)
+
+        # Jail check — must be inside serve root and not the root itself
+        if not real_target.startswith(serve_root + os.sep):
+            self._send_error(403, 'Forbidden')
+            return
+
+        if not os.path.exists(real_target):
+            self._send_error(404, 'Not found')
+            return
+
+        try:
+            if os.path.isfile(real_target) or os.path.islink(real_target):
+                os.unlink(real_target)
+            elif os.path.isdir(real_target):
+                if recursive:
+                    shutil.rmtree(real_target)
+                else:
+                    os.rmdir(real_target)   # raises OSError if non-empty
+            else:
+                self._send_error(400, 'Unsupported file type')
+                return
+        except OSError as e:
+            self._send_error(400, str(e))
+            return
+
+        resp = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+
+    # ------------------------------------------------------------------
     # Directory listing
     # ------------------------------------------------------------------
     def list_directory(self, path):
@@ -171,6 +220,12 @@ class FileServerHandler(SimpleHTTPRequestHandler):
             zip_cell = (f'<td class="zip-cell"><a class="zip-link" '
                         f'href="{urllib.parse.quote(name)}/?zip" '
                         f'title="Download as zip">[zip]</a></td>') if is_dir else '<td></td>'
+            enc_name = html.escape(name, quote=True)
+            del_flag = '?recursive' if is_dir else ''
+            del_cell = (f'<td class="del-cell">'
+                        f'<button class="del-btn" '
+                        f'data-name="{enc_name}" data-flag="{del_flag}" '
+                        f'title="Delete">&#x2715;</button></td>')
 
             rows.append(
                 f'<tr class="{cls}">'
@@ -178,6 +233,7 @@ class FileServerHandler(SimpleHTTPRequestHandler):
                 f'<td class="size">{size_str}</td>'
                 f'<td class="mtime">{mtime}</td>'
                 f'{zip_cell}'
+                f'{del_cell}'
                 f'</tr>'
             )
 
@@ -223,6 +279,19 @@ class FileServerHandler(SimpleHTTPRequestHandler):
     .zip-cell {{ text-align: right; white-space: nowrap; width: 1%; }}
     .zip-link {{ color: #334433; font-size: 0.8em; text-decoration: none; }}
     .zip-link:hover {{ color: #00ffcc; }}
+    .del-cell {{ text-align: right; white-space: nowrap; width: 1%; padding-left: 4px; }}
+    .del-btn {{
+      background: none;
+      border: none;
+      color: #2a1414;
+      cursor: pointer;
+      font-size: 0.9em;
+      padding: 2px 5px;
+      font-family: inherit;
+      transition: color 0.15s;
+    }}
+    .del-btn:hover {{ color: #ff4444; }}
+    tr.deleting td {{ opacity: 0.4; }}
 
     /* Upload area */
     .upload-section {{
@@ -275,7 +344,11 @@ class FileServerHandler(SimpleHTTPRequestHandler):
       min-height: 1.2em;
       word-break: break-all;
     }}
-    .status.scanning {{ color: #00ffcc; }}
+    @keyframes scanpulse {{
+      0%, 100% {{ opacity: 1; }}
+      50%       {{ opacity: 0.5; }}
+    }}
+    .status.scanning {{ color: #00ffcc; animation: scanpulse 1.2s ease-in-out infinite; }}
     .status.error    {{ color: #ff4444; }}
     .status.done     {{ color: #00ff88; }}
     .progress-wrap {{
@@ -303,7 +376,7 @@ class FileServerHandler(SimpleHTTPRequestHandler):
 
   <table>
     <thead>
-      <tr><th>NAME</th><th>SIZE</th><th>MODIFIED</th><th></th></tr>
+      <tr><th>NAME</th><th>SIZE</th><th>MODIFIED</th><th></th><th></th></tr>
     </thead>
     <tbody>
       {rows_html}
@@ -351,22 +424,53 @@ class FileServerHandler(SimpleHTTPRequestHandler):
 
     // ----------------------------------------------------------------
     // Recursively collect files from a FileSystemEntry
-    // Updates the status label as it finds files.
+    // Updates the status label as it finds files, with a live timer.
     // ----------------------------------------------------------------
     let _scanCount = 0;
+    let _scanDirCount = 0;
+    let _scanCurrentDir = '';
+    let _scanTimer = null;
+    let _scanStart = 0;
+
+    function _scanTick() {{
+      const elapsed = ((Date.now() - _scanStart) / 1000).toFixed(1);
+      const dirHint = _scanCurrentDir ? ` — ${{_scanCurrentDir}}` : '';
+      status.textContent =
+        `Scanning... ${{_scanCount}} file${{_scanCount !== 1 ? 's' : ''}} ` +
+        `in ${{_scanDirCount}} dir${{_scanDirCount !== 1 ? 's' : ''}} [${{elapsed}}s]${{dirHint}}`;
+    }}
+
+    function startScanTimer() {{
+      _scanStart = Date.now();
+      _scanTimer = setInterval(_scanTick, 200);
+    }}
+
+    function stopScanTimer() {{
+      if (_scanTimer) {{ clearInterval(_scanTimer); _scanTimer = null; }}
+    }}
 
     async function collectEntries(entry, basePath) {{
       const files = [];
       if (entry.isFile) {{
-        const file = await new Promise(r => entry.file(r));
-        files.push({{ file, relpath: basePath + entry.name }});
-        _scanCount++;
-        status.textContent = `Scanning... ${{_scanCount}} file${{_scanCount !== 1 ? 's' : ''}} found`;
+        try {{
+          const file = await new Promise((res, rej) => entry.file(res, rej));
+          files.push({{ file, relpath: basePath + entry.name }});
+          _scanCount++;
+        }} catch (e) {{
+          console.warn('Skipping file (read error):', basePath + entry.name, e);
+        }}
       }} else if (entry.isDirectory) {{
+        _scanDirCount++;
+        _scanCurrentDir = (basePath + entry.name + '/').replace(/^\//, '');
         const reader = entry.createReader();
         let batch;
         do {{
-          batch = await new Promise(r => reader.readEntries(r));
+          try {{
+            batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+          }} catch (e) {{
+            console.warn('Skipping dir (readEntries error):', _scanCurrentDir, e);
+            break;
+          }}
           for (const child of batch) {{
             const sub = await collectEntries(child, basePath + entry.name + '/');
             files.push(...sub);
@@ -442,8 +546,11 @@ class FileServerHandler(SimpleHTTPRequestHandler):
       if (!entries.length) return;
 
       _scanCount = 0;
+      _scanDirCount = 0;
+      _scanCurrentDir = '';
       status.className = 'status scanning';
       status.textContent = 'Scanning...';
+      startScanTimer();
 
       const allFiles = [];
       for (const entry of entries) {{
@@ -451,7 +558,9 @@ class FileServerHandler(SimpleHTTPRequestHandler):
         allFiles.push(...collected);
       }}
 
+      stopScanTimer();
       if (allFiles.length) uploadAll(allFiles);
+      else {{ status.className = 'status'; status.textContent = 'No files found.'; }}
     }});
 
     // ----------------------------------------------------------------
@@ -478,6 +587,43 @@ class FileServerHandler(SimpleHTTPRequestHandler):
       }}));
       if (items.length) uploadAll(items);
       this.value = '';
+    }});
+
+    // ----------------------------------------------------------------
+    // Delete buttons — one per row
+    // ----------------------------------------------------------------
+    document.querySelector('tbody').addEventListener('click', async e => {{
+      const btn = e.target.closest('.del-btn');
+      if (!btn) return;
+
+      const name = btn.dataset.name;
+      const flag = btn.dataset.flag;   // '' for files, '?recursive' for dirs
+      const row  = btn.closest('tr');
+
+      const label = flag ? `"${{name}}" and all its contents` : `"${{name}}"`;
+      if (!confirm(`Delete ${{label}}?`)) return;
+
+      row.classList.add('deleting');
+      btn.disabled = true;
+
+      try {{
+        const resp = await fetch(uploadUrl + encodeURIComponent(name) + flag, {{
+          method: 'DELETE',
+          headers: {{ 'Accept': 'application/json' }}
+        }});
+        if (resp.ok) {{
+          row.remove();
+        }} else {{
+          const text = await resp.text();
+          alert(`Delete failed: ${{text}}`);
+          row.classList.remove('deleting');
+          btn.disabled = false;
+        }}
+      }} catch (err) {{
+        alert(`Delete failed: ${{err}}`);
+        row.classList.remove('deleting');
+        btn.disabled = false;
+      }}
     }});
   </script>
 </body>
