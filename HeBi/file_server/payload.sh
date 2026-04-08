@@ -6,7 +6,7 @@
 #              Supports foreground (with kill switch) or background mode.
 # Version:     1.3
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="/mmc/root/payloads/user/HeBi/file_server"
 DEFAULT_PORT=8080
 DEFAULT_DIR="/root"
 DEFAULT_USER="hebi"
@@ -86,6 +86,34 @@ IP=$(ip -4 addr show br-lan 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9
 [ -z "$IP" ] && IP="pager-ip"
 
 # ----------------------------------------------------------------
+# Check python3 is available
+# ----------------------------------------------------------------
+if ! command -v python3 >/dev/null 2>&1; then
+    LOG yellow "python3 not found"
+    resp=$(CONFIRMATION_DIALOG "python3 is not installed. Install it now? (requires internet)")
+    if [ "$resp" = "1" ]; then
+        LOG blue "Checking internet connection..."
+        if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            LOG red "No internet connection"
+            ERROR_DIALOG "No internet connection detected.\n\nConnect to WiFi first, then try again."
+            exit 1
+        fi
+        LOG blue "Running opkg update..."
+        opkg update 2>&1 | while IFS= read -r line; do LOG blue "$line"; done
+        LOG blue "Installing python3-light and required modules..."
+        opkg install python3-light python3-urllib python3-email python3-http python3-logging 2>&1 | while IFS= read -r line; do LOG blue "$line"; done
+        if ! command -v python3 >/dev/null 2>&1; then
+            LOG red "python3 installation failed"
+            ERROR_DIALOG "python3 installation failed.\n\nCheck internet connection and try manually:\n  opkg update\n  opkg install python3-light python3-urllib python3-email python3-http python3-logging"
+            exit 1
+        fi
+        LOG green "python3 installed successfully"
+    else
+        exit 0
+    fi
+fi
+
+# ----------------------------------------------------------------
 # Start server
 # ----------------------------------------------------------------
 LOG blue "Starting file server..."
@@ -97,16 +125,21 @@ else
 fi
 LOG blue "URL: http://$IP:$PORT"
 
-python3 "$SCRIPT_DIR/httpd.py" "$PORT" "$SERVE_DIR" "$DEFAULT_USER" "$PASSWORD" &
+PYTHON_ERR=$(mktemp)
+python3 "$SCRIPT_DIR/httpd.py" "$PORT" "$SERVE_DIR" "$DEFAULT_USER" "$PASSWORD" 2>"$PYTHON_ERR" &
 SERVER_PID=$!
 
 sleep 1
 
 if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    LOG red "Server failed to start - port $PORT may be in use"
-    ERROR_DIALOG "Server failed to start.\nPort $PORT may be in use.\n\nTry a different port."
+    ERR_MSG=$(tail -3 "$PYTHON_ERR" 2>/dev/null)
+    rm -f "$PYTHON_ERR"
+    LOG red "Server failed to start"
+    [ -n "$ERR_MSG" ] && LOG red "$ERR_MSG"
+    ERROR_DIALOG "Server failed to start.\n\n${ERR_MSG:-Port $PORT may be in use.}"
     exit 1
 fi
+rm -f "$PYTHON_ERR"
 
 echo "$SERVER_PID" > "$PID_FILE"
 LOG green "File server running (PID $SERVER_PID)"
