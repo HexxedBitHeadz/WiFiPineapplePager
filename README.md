@@ -2,7 +2,7 @@
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://paypal.me/DevinCleary)
 
-#### UPDATE - APR 20206 >>>
+#### UPDATE - MAY 20206 >>>
 
 evilginx portal added. This tools will ask for url, and redirect connected targets to it. See demo running evilginx via VPS (dropping May 8): https://hexxedbitheadz.com/hackers-w-handhelds-v-2-0/
 
