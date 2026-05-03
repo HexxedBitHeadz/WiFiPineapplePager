@@ -4,7 +4,7 @@
 
 #### UPDATE - APR 20206 >>>
 
-evilginx portal added. This tools will ask for url, and redirect connected targets to it. See demo running evilginx via VPS: https://hexxedbitheadz.com/hackers-w-handhelds-v-2-0/
+evilginx portal added. This tools will ask for url, and redirect connected targets to it. See demo running evilginx via VPS (dropping May 8): https://hexxedbitheadz.com/hackers-w-handhelds-v-2-0/
 
 
 #### UPDATE - APR 20206 >>>
