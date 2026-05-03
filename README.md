@@ -4,6 +4,11 @@
 
 #### UPDATE - APR 20206 >>>
 
+evilginx portal added. This tools will ask for url, and redirect connected targets to it. See demo running evilginx via VPS: https://hexxedbitheadz.com/hackers-w-handhelds-v-2-0/
+
+
+#### UPDATE - APR 20206 >>>
+
 Merged all tools to one root folder "HeBi", makes it easier to manage compared to being under several different folders.
 
 Added file_server! Fire this up to launch a web based file server on the Pager, features allow custom port asisgnment, authentication and ability to run in background. Allows for easy uploads / easy downloads!
